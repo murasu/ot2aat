@@ -1,0 +1,108 @@
+# ===============================================================================
+# macOS
+# ===============================================================================
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Icon must end with two \r
+Icon
+
+# Thumbnails
+._*
+
+# Files that might appear in the root of a volume
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Directories potentially created on remote AFP share
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# ===============================================================================
+# Xcode
+# ===============================================================================
+*.xcodeproj
+!default.xcodeproj
+*.xcworkspace
+!default.xcworkspace
+xcuserdata/
+DerivedData/
+.swiftpm/
+*.xcscmblueprint
+*.xccheckout
+
+# Xcode Patch
+*.xcodeproj/*
+!*.xcodeproj/project.pbxproj
+!*.xcodeproj/xcshareddata/
+!*.xcworkspace/contents.xcworkspacedata
+
+# ===============================================================================
+# Swift Package Manager
+# ===============================================================================
+.build/
+Packages/
+Package.resolved
+.swiftpm/
+
+# ===============================================================================
+# Font Files
+# ===============================================================================
+fonts/
+*.ttf
+*.otf
+*.woff
+*.woff2
+*.eot
+*.ttc
+*.dfont
+
+# Font working files
+*.vfb
+*.fog
+*.ufo
+*.glyphs
+*.glyphx
+
+# ===============================================================================
+# Generated Files
+# ===============================================================================
+*.mif
+*.atif
+*.morx
+*.kerx
+*.just
+
+# ===============================================================================
+# Build artifacts
+# ===============================================================================
+*.o
+*.lo
+*.la
+*.dylib
+*.a
+*.swp
+*~
+
+# ===============================================================================
+# IDE
+# ===============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ===============================================================================
+# Testing
+# ===============================================================================
+test_output/
+*.log
