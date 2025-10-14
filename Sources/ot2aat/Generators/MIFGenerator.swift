@@ -152,3 +152,107 @@ struct MIFGenerator {
         return output
     }
 }
+
+extension MIFGenerator {
+    /// Generate MIF for rearrangement (Type 0)
+    static func generateReorder(
+        rules: [ReorderRule],
+        classes: [GlyphClass],
+        featureName: String,
+        selectorNumber: Int
+    ) throws -> String {
+        var output = ""
+        
+        output += "// " + String(repeating: "-", count: 79) + "\n"
+        output += "//\n"
+        output += "//  Generated MIF for rearrangement\n"
+        output += "//  Feature: \(featureName), Selector: \(selectorNumber)\n"
+        output += "//  Generated: \(Date())\n"
+        output += "//\n"
+        output += "// " + String(repeating: "-", count: 79) + "\n\n"
+        
+        // Expand all rules
+        var registry = GlyphClassRegistry()
+        for glyphClass in classes {
+            try registry.register(glyphClass)
+        }
+        
+        var expandedRules: [ExpandedReorderRule] = []
+        for rule in rules {
+            let expanded = try rule.expand(using: registry)
+            expandedRules.append(contentsOf: expanded)
+        }
+        
+        // Group rules by pattern
+        let groupedRules = Dictionary(grouping: expandedRules) { $0.pattern }
+        
+        // Generate a subtable for each pattern group
+        for (index, (pattern, rulesForPattern)) in groupedRules.enumerated() {
+            if index > 0 {
+                output += "\n"
+            }
+            output += try generateReorderSubtable(
+                rules: rulesForPattern,
+                pattern: pattern,
+                featureName: featureName,
+                selectorNumber: selectorNumber,
+                tableNumber: index
+            )
+        }
+        
+        return output
+    }
+    
+    private static func generateReorderSubtable(
+        rules: [ExpandedReorderRule],
+        pattern: ReorderPattern,
+        featureName: String,
+        selectorNumber: Int,
+        tableNumber: Int
+    ) throws -> String {
+        var output = ""
+        
+        output += "// " + String(repeating: "-", count: 79) + "\n"
+        output += "// TABLE \(tableNumber): Rearrangement (\(pattern.rawValue))\n"
+        output += "// " + String(repeating: "-", count: 79) + "\n\n"
+        
+        // Header
+        output += "Type\t\t\t\tRearrangement\n"
+        output += "Name\t\t\t\t\(featureName)\n"
+        output += "Namecode\t\t\t8\n"
+        output += "Setting\t\t\t\t\(featureName)\n"
+        output += "Settingcode\t\t\t\(selectorNumber)\n"
+        output += "Default\t\t\t\tyes\n"
+        output += "Orientation\t\t\tHV\n"
+        output += "Forward\t\t\t\tyes\n"
+        output += "Exclusive\t\t\tno\n\n"
+        
+        // Collect all unique glyphs from all rules
+        var firstGlyphs = Set<String>()
+        var lastGlyphs = Set<String>()
+        
+        for rule in rules {
+            firstGlyphs.insert(rule.before.first!)
+            lastGlyphs.insert(rule.before.last!)
+        }
+        
+        // Define classes
+        output += "FirstGlyphs\t\t" + firstGlyphs.sorted().joined(separator: " ") + "\n"
+        output += "LastGlyphs\t\t" + lastGlyphs.sorted().joined(separator: " ") + "\n\n"
+        
+        // State array
+        output += "\t\t\t\tEOT\tOOB\tDEL\tEOL\tFirstGlyphs\tLastGlyphs\n"
+        output += "StartText\t\t1\t1\t1\t1\t2\t\t\t1\n"
+        output += "StartLine\t\t1\t1\t1\t1\t2\t\t\t1\n"
+        output += "SawFirst\t\t1\t1\t3\t1\t2\t\t\t4\n\n"
+        
+        // Transition list
+        output += "\tGoTo\t\t\tMarkFirst?\tMarkLast?\tAdvance?\tDoThis\n"
+        output += "1\tStartText\t\tno\t\t\tno\t\t\tyes\t\t\tnone\n"
+        output += "2\tSawFirst\t\tyes\t\t\tno\t\t\tyes\t\t\tnone\n"
+        output += "3\tSawFirst\t\tno\t\t\tno\t\t\tyes\t\t\tnone\n"
+        output += "4\tStartText\t\tno\t\t\tyes\t\t\tyes\t\t\t\(pattern.rawValue)\n"
+        
+        return output
+    }
+}

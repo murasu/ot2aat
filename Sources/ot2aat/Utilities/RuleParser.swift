@@ -49,3 +49,260 @@ struct RuleParser {
         return rules
     }
 }
+
+
+extension RuleParser {
+    /// Parse reorder rules from a file
+    /// Format:
+    ///   @class name = glyph1 glyph2 ...
+    ///   pattern => pattern
+    static func parseReorderRules(from path: String) throws -> (classes: [GlyphClass], rules: [ReorderRule]) {
+        guard FileManager.default.fileExists(atPath: path) else {
+            throw OT2AATError.fileNotFound(path)
+        }
+        
+        let content = try String(contentsOfFile: path, encoding: .utf8)
+        var registry = GlyphClassRegistry()
+        var classes: [GlyphClass] = []
+        var rules: [ReorderRule] = []
+        
+        for (lineNumber, line) in content.components(separatedBy: .newlines).enumerated() {
+            let lineNum = lineNumber + 1
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            
+            // Skip empty lines and comments
+            if trimmed.isEmpty || trimmed.hasPrefix("#") {
+                continue
+            }
+            
+            // Remove end-of-line comments
+            let withoutComment = trimmed.components(separatedBy: "#")[0].trimmingCharacters(in: .whitespaces)
+            
+            // Parse class definition
+            if withoutComment.hasPrefix("@class ") {
+                let glyphClass = try parseClassDefinition(withoutComment, lineNumber: lineNum)
+                try registry.register(glyphClass)
+                classes.append(glyphClass)
+                continue
+            }
+            
+            // Parse reorder rule
+            if withoutComment.contains("=>") {
+                let rule = try parseReorderRule(withoutComment, lineNumber: lineNum, registry: registry)
+                rules.append(rule)
+                continue
+            }
+            
+            // Unknown line format
+            throw OT2AATError.invalidRule("Line \(lineNum): Unrecognized syntax: '\(trimmed)'")
+        }
+        
+        if rules.isEmpty {
+            throw OT2AATError.invalidRule("No valid rules found in file")
+        }
+        
+        return (classes, rules)
+    }
+    
+    /// Parse a class definition line
+    /// Format: @class name = glyph1 glyph2 glyph3 ...
+    private static func parseClassDefinition(_ line: String, lineNumber: Int) throws -> GlyphClass {
+        // Remove "@class " prefix
+        let withoutPrefix = line.dropFirst(7).trimmingCharacters(in: .whitespaces)
+        
+        // Split on '='
+        let parts = withoutPrefix.components(separatedBy: "=")
+        guard parts.count == 2 else {
+            throw OT2AATError.invalidRule(
+                """
+                Line \(lineNumber): Invalid class definition syntax
+                Expected: @class name = glyph1 glyph2 ...
+                Got: \(line)
+                """
+            )
+        }
+        
+        let name = parts[0].trimmingCharacters(in: .whitespaces)
+        let glyphsString = parts[1].trimmingCharacters(in: .whitespaces)
+        
+        // Validate class name
+        guard !name.isEmpty else {
+            throw OT2AATError.invalidRule("Line \(lineNumber): Class name cannot be empty")
+        }
+        
+        guard isValidIdentifier(name) else {
+            throw OT2AATError.invalidRule(
+                """
+                Line \(lineNumber): Invalid class name '@\(name)'
+                Class names must start with a letter or underscore
+                and contain only letters, digits, and underscores
+                """
+            )
+        }
+        
+        // Parse glyph list
+        let glyphs = glyphsString
+            .components(separatedBy: .whitespaces)
+            .filter { !$0.isEmpty }
+        
+        guard !glyphs.isEmpty else {
+            throw OT2AATError.invalidRule("Line \(lineNumber): Class '@\(name)' cannot be empty")
+        }
+        
+        return GlyphClass(name: name, glyphs: glyphs)
+    }
+    
+    /// Parse a reorder rule line
+    /// Format: element1 element2 => element1' element2'
+    private static func parseReorderRule(
+        _ line: String,
+        lineNumber: Int,
+        registry: GlyphClassRegistry
+    ) throws -> ReorderRule {
+        // Split on '=>'
+        let parts = line.components(separatedBy: "=>")
+        guard parts.count == 2 else {
+            throw OT2AATError.invalidRule(
+                """
+                Line \(lineNumber): Invalid rule syntax
+                Expected: pattern => pattern
+                Got: \(line)
+                """
+            )
+        }
+        
+        let beforeStr = parts[0].trimmingCharacters(in: .whitespaces)
+        let afterStr = parts[1].trimmingCharacters(in: .whitespaces)
+        
+        // Parse elements
+        let beforeElements = try parseRuleElements(beforeStr, lineNumber: lineNumber)
+        let afterElements = try parseRuleElements(afterStr, lineNumber: lineNumber)
+        
+        // Validate element count
+        guard beforeElements.count == afterElements.count else {
+            throw OT2AATError.invalidRule(
+                """
+                Line \(lineNumber): Element count mismatch
+                Left side has \(beforeElements.count) elements
+                Right side has \(afterElements.count) elements
+                Both sides must have the same number of elements
+                """
+            )
+        }
+        
+        // Validate element count (2-4)
+        guard beforeElements.count >= 2 && beforeElements.count <= 4 else {
+            throw OT2AATError.invalidRule(
+                """
+                Line \(lineNumber): Invalid pattern length
+                Pattern must have 2-4 elements, got \(beforeElements.count)
+                AAT supports maximum 4-element rearrangement patterns
+                """
+            )
+        }
+        
+        // Verify all class references exist
+        for element in beforeElements + afterElements {
+            if case .classRef(let name) = element {
+                guard registry.contains(name) else {
+                    throw OT2AATError.invalidRule(
+                        """
+                        Line \(lineNumber): Undefined class '@\(name)'
+                        Define class before use: @class \(name) = ...
+                        """
+                    )
+                }
+            }
+        }
+        
+        return ReorderRule(before: beforeElements, after: afterElements, lineNumber: lineNumber)
+    }
+    
+    /// Parse rule elements from a string
+    private static func parseRuleElements(_ string: String, lineNumber: Int) throws -> [RuleElement] {
+        let tokens = string
+            .components(separatedBy: .whitespaces)
+            .filter { !$0.isEmpty }
+        
+        guard !tokens.isEmpty else {
+            throw OT2AATError.invalidRule("Line \(lineNumber): Empty pattern")
+        }
+        
+        return tokens.map { token in
+            if token.hasPrefix("@") {
+                // Class reference
+                let className = String(token.dropFirst())
+                return .classRef(className)
+            } else {
+                // Explicit glyph
+                return .glyph(token)
+            }
+        }
+    }
+    
+    /// Parse a single reorder rule from command line (no classes)
+    static func parseReorderRuleFromString(_ ruleString: String) throws -> ReorderRule {
+        let parts = ruleString.components(separatedBy: "=>")
+        guard parts.count == 2 else {
+            throw OT2AATError.invalidRule(
+                """
+                Invalid rule syntax
+                Expected: glyph1 glyph2 => glyph2 glyph1
+                Got: \(ruleString)
+                """
+            )
+        }
+        
+        let beforeStr = parts[0].trimmingCharacters(in: .whitespaces)
+        let afterStr = parts[1].trimmingCharacters(in: .whitespaces)
+        
+        let beforeGlyphs = beforeStr.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+        let afterGlyphs = afterStr.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+        
+        // No class references allowed in CLI mode
+        for glyph in beforeGlyphs + afterGlyphs {
+            if glyph.hasPrefix("@") {
+                throw OT2AATError.invalidRule(
+                    """
+                    Class references not supported in single-rule mode
+                    Use -i/--input with a rules file for class support
+                    Got: \(glyph)
+                    """
+                )
+            }
+        }
+        
+        guard beforeGlyphs.count == afterGlyphs.count else {
+            throw OT2AATError.invalidRule(
+                """
+                Element count mismatch
+                Left side has \(beforeGlyphs.count) elements
+                Right side has \(afterGlyphs.count) elements
+                """
+            )
+        }
+        
+        guard beforeGlyphs.count >= 2 && beforeGlyphs.count <= 4 else {
+            throw OT2AATError.invalidRule(
+                """
+                Pattern must have 2-4 elements, got \(beforeGlyphs.count)
+                """
+            )
+        }
+        
+        let beforeElements = beforeGlyphs.map { RuleElement.glyph($0) }
+        let afterElements = afterGlyphs.map { RuleElement.glyph($0) }
+        
+        return ReorderRule(before: beforeElements, after: afterElements, lineNumber: 1)
+    }
+    
+    /// Check if a string is a valid identifier
+    private static func isValidIdentifier(_ string: String) -> Bool {
+        guard !string.isEmpty else { return false }
+        
+        let first = string.first!
+        guard first.isLetter || first == "_" else { return false }
+        
+        return string.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
+    }
+}
