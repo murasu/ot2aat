@@ -306,3 +306,229 @@ extension RuleParser {
         return string.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
     }
 }
+
+extension RuleParser {
+    /// Parse contextual substitution rules from a file
+    static func parseContextualRules(from path: String) throws -> (classes: [GlyphClass], rules: [ContextualRule]) {
+        guard FileManager.default.fileExists(atPath: path) else {
+            throw OT2AATError.fileNotFound(path)
+        }
+        
+        let content = try String(contentsOfFile: path, encoding: .utf8)
+        var registry = GlyphClassRegistry()
+        var classes: [GlyphClass] = []
+        var rules: [ContextualRule] = []
+        
+        for (lineNumber, line) in content.components(separatedBy: .newlines).enumerated() {
+            let lineNum = lineNumber + 1
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            
+            // Skip empty lines and comments
+            if trimmed.isEmpty || trimmed.hasPrefix("#") {
+                continue
+            }
+            
+            // Remove end-of-line comments
+            let withoutComment = trimmed.components(separatedBy: "#")[0].trimmingCharacters(in: .whitespaces)
+            
+            // Parse class definition
+            if withoutComment.hasPrefix("@class ") {
+                let glyphClass = try parseClassDefinition(withoutComment, lineNumber: lineNum)
+                try registry.register(glyphClass)
+                classes.append(glyphClass)
+                continue
+            }
+            
+            // Parse contextual rule
+            if withoutComment.contains(":") && withoutComment.contains("=>") {
+                let rule = try parseContextualRule(withoutComment, lineNumber: lineNum, registry: registry)
+                rules.append(rule)
+                continue
+            }
+            
+            throw OT2AATError.invalidRule("Line \(lineNum): Unrecognized syntax: '\(trimmed)'")
+        }
+        
+        if rules.isEmpty {
+            throw OT2AATError.invalidRule("No valid rules found in file")
+        }
+        
+        return (classes, rules)
+    }
+    
+    /// Parse a single contextual rule line
+    private static func parseContextualRule(
+        _ line: String,
+        lineNumber: Int,
+        registry: GlyphClassRegistry
+    ) throws -> ContextualRule {
+        // Split by ':' to separate context from substitution
+        let parts = line.components(separatedBy: ":")
+        guard parts.count == 2 else {
+            throw OT2AATError.invalidRule(
+                "Line \(lineNumber): Expected format 'context: target => replacement'"
+            )
+        }
+        
+        let contextStr = parts[0].trimmingCharacters(in: .whitespaces)
+        let substStr = parts[1].trimmingCharacters(in: .whitespaces)
+        
+        // Parse context
+        let context = try parseContext(contextStr, lineNumber: lineNumber)
+        
+        // Parse substitutions
+        let substitutions = try parseSubstitutions(substStr, lineNumber: lineNumber)
+        
+        // Validate substitutions based on context type
+        if case .when = context {
+            // Multiple substitutions allowed
+        } else {
+            // Only single substitution for after/before/between
+            guard substitutions.count == 1 else {
+                throw OT2AATError.invalidRule(
+                    "Line \(lineNumber): Only 'when' context supports multiple substitutions"
+                )
+            }
+        }
+        
+        return ContextualRule(context: context, substitutions: substitutions, lineNumber: lineNumber)
+    }
+    
+    /// Parse context pattern
+    private static func parseContext(_ contextStr: String, lineNumber: Int) throws -> ContextType {
+        let lower = contextStr.lowercased()
+        
+        if lower.hasPrefix("after ") {
+            let pattern = String(contextStr.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+            let elements = try parseRuleElements(pattern, lineNumber: lineNumber)
+            guard !elements.isEmpty && elements.count <= 10 else {
+                throw OT2AATError.invalidRule("Line \(lineNumber): Context pattern must have 1-10 elements")
+            }
+            return .after(elements)
+            
+        } else if lower.hasPrefix("before ") {
+            let pattern = String(contextStr.dropFirst(7)).trimmingCharacters(in: .whitespaces)
+            let elements = try parseRuleElements(pattern, lineNumber: lineNumber)
+            guard !elements.isEmpty && elements.count <= 10 else {
+                throw OT2AATError.invalidRule("Line \(lineNumber): Context pattern must have 1-10 elements")
+            }
+            return .before(elements)
+            
+        } else if lower.hasPrefix("between ") && lower.contains(" and ") {
+            let betweenPart = String(contextStr.dropFirst(8))
+            let andParts = betweenPart.components(separatedBy: " and ")
+            guard andParts.count == 2 else {
+                throw OT2AATError.invalidRule(
+                    "Line \(lineNumber): Expected 'between pattern1 and pattern2'"
+                )
+            }
+            
+            let first = try parseRuleElements(andParts[0].trimmingCharacters(in: .whitespaces), lineNumber: lineNumber)
+            let second = try parseRuleElements(andParts[1].trimmingCharacters(in: .whitespaces), lineNumber: lineNumber)
+            
+            guard !first.isEmpty && !second.isEmpty else {
+                throw OT2AATError.invalidRule("Line \(lineNumber): Both patterns must be non-empty")
+            }
+            guard first.count <= 10 && second.count <= 10 else {
+                throw OT2AATError.invalidRule("Line \(lineNumber): Context patterns must have max 10 elements")
+            }
+            
+            return .between(first: first, second: second)
+            
+        } else if lower.hasPrefix("when ") {
+            let pattern = String(contextStr.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+            let elements = try parseRuleElements(pattern, lineNumber: lineNumber)
+            guard !elements.isEmpty && elements.count <= 10 else {
+                throw OT2AATError.invalidRule("Line \(lineNumber): Pattern must have 1-10 elements")
+            }
+            return .when(elements)
+            
+        } else {
+            throw OT2AATError.invalidRule(
+                """
+                Line \(lineNumber): Unknown context type
+                Expected: 'after', 'before', 'between', or 'when'
+                Got: '\(contextStr)'
+                """
+            )
+        }
+    }
+    
+    /// Parse substitutions (comma-separated for 'when' context)
+    private static func parseSubstitutions(_ substStr: String, lineNumber: Int) throws -> [SubstitutionPair] {
+        let substParts = substStr.components(separatedBy: ",")
+        var substitutions: [SubstitutionPair] = []
+        
+        for part in substParts {
+            let trimmed = part.trimmingCharacters(in: .whitespaces)
+            let arrowParts = trimmed.components(separatedBy: "=>")
+            
+            guard arrowParts.count == 2 else {
+                throw OT2AATError.invalidRule(
+                    "Line \(lineNumber): Expected 'target => replacement' in substitution"
+                )
+            }
+            
+            let targetStr = arrowParts[0].trimmingCharacters(in: .whitespaces)
+            let replStr = arrowParts[1].trimmingCharacters(in: .whitespaces)
+            
+            // Check for wildcard patterns
+            if targetStr == "*" || replStr == "*" || targetStr.contains("*") || replStr.contains("*") {
+                // Keep wildcards as-is (ftxenhancer will expand)
+                let target: RuleElement = targetStr.hasPrefix("@") ? 
+                    .classRef(String(targetStr.dropFirst())) : .glyph(targetStr)
+                let repl: RuleElement = replStr.hasPrefix("@") ?
+                    .classRef(String(replStr.dropFirst())) : .glyph(replStr)
+                
+                substitutions.append(SubstitutionPair(target: target, replacement: repl))
+            } else {
+                // Regular substitution
+                let targetElements = try parseRuleElements(targetStr, lineNumber: lineNumber)
+                let replElements = try parseRuleElements(replStr, lineNumber: lineNumber)
+                
+                guard targetElements.count == 1 && replElements.count == 1 else {
+                    throw OT2AATError.invalidRule(
+                        "Line \(lineNumber): Each substitution must have single target and replacement"
+                    )
+                }
+                
+                substitutions.append(SubstitutionPair(
+                    target: targetElements[0],
+                    replacement: replElements[0]
+                ))
+            }
+        }
+        
+        return substitutions
+    }
+    
+    /// Parse single contextual rule from CLI (no classes, explicit glyphs only)
+    static func parseContextualRuleFromString(_ ruleString: String) throws -> ContextualRule {
+        // Split by ':'
+        let parts = ruleString.components(separatedBy: ":")
+        guard parts.count == 2 else {
+            throw OT2AATError.invalidRule(
+                "Expected format: 'context: target => replacement'"
+            )
+        }
+        
+        let contextStr = parts[0].trimmingCharacters(in: .whitespaces)
+        let substStr = parts[1].trimmingCharacters(in: .whitespaces)
+        
+        // Parse context (no classes allowed)
+        let context = try parseContext(contextStr, lineNumber: 1)
+        
+        // Verify no class references
+        let allText = ruleString
+        if allText.contains("@") {
+            throw OT2AATError.invalidRule(
+                "Class references not supported in single-rule mode. Use -i/--input with a rules file."
+            )
+        }
+        
+        // Parse substitution
+        let substitutions = try parseSubstitutions(substStr, lineNumber: 1)
+        
+        return ContextualRule(context: context, substitutions: substitutions, lineNumber: 1)
+    }
+}
