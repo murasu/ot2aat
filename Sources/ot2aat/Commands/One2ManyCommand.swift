@@ -7,14 +7,20 @@ struct One2ManyCommand: ParsableCommand, OT2AATCommand {
         abstract: "Convert one-to-many glyph substitutions (e.g., splitting Sara AM)"
     )
     
-    @Option(name: [.short, .long], help: "Output format (mif or atif)")
-    var format: OutputFormat
+    @Flag(name: .customLong("mif"), help: "Output MIF format")
+    var mifFormat: Bool = false
+    
+    @Flag(name: .customLong("atif"), help: "Output ATIF format")
+    var atifFormat: Bool = false
     
     @Option(name: .shortAndLong, help: "Source glyph (for single rule)")
     var source: String?
     
-    @Option(name: .shortAndLong, help: "Target glyphs (space-separated, for single rule)")
+    @Option(name: .shortAndLong, parsing: .upToNextOption, help: "Target glyphs (space-separated, for single rule)")
     var target: [String] = []
+    
+    //@Option(name: .shortAndLong, help: "Target glyphs (space-separated, for single rule)")
+    //var target: [String] = []
     
     @Option(name: .shortAndLong, help: "Input rules file")
     var input: String?
@@ -28,7 +34,12 @@ struct One2ManyCommand: ParsableCommand, OT2AATCommand {
     @Option(name: .long, help: "Selector number")
     var selector: Int
     
-    var outputFormat: OutputFormat { format }
+    var outputFormat: OutputFormat {
+        if mifFormat { return .mif }
+        if atifFormat { return .atif }
+        return .mif // default
+    }
+    
     var outputFile: String? { output }
     var featureName: String { feature }
     var selectorNumber: Int { selector }
@@ -45,6 +56,15 @@ struct One2ManyCommand: ParsableCommand, OT2AATCommand {
         
         if source != nil && input != nil {
             throw ValidationError("Cannot use both -s/--source and -i/--input")
+        }
+        
+        // Must specify exactly one format
+        if mifFormat && atifFormat {
+            throw ValidationError("Cannot specify both --mif and --atif")
+        }
+        
+        if !mifFormat && !atifFormat {
+            throw ValidationError("Must specify either --mif or --atif")
         }
     }
     

@@ -1,7 +1,5 @@
-import Foundation
 import ArgumentParser
 
-@main
 struct OT2AAT: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "ot2aat",
@@ -17,3 +15,5 @@ struct OT2AAT: ParsableCommand {
         ]
     )
 }
+
+OT2AAT.main()

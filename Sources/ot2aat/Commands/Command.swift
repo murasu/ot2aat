@@ -1,4 +1,5 @@
 import Foundation
+import ArgumentParser
 
 protocol OT2AATCommand {
     var outputFormat: OutputFormat { get }
