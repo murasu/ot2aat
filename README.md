@@ -177,7 +177,7 @@ This will open the project in Xcode where you can edit, build, and debug.
 
 ## License
 
-MIT License - See LICENSE file for details
+Proprietory. (C) 2025 Muthu Nedumaran. All rights reserved
 
 ## Contributing
 
