@@ -39,6 +39,7 @@ struct ContextualRule {
 				context: .after(contextGlyphs.map { $0[i % $0.count] }),
 				substitutions: [(target: targetGlyphs[0][i], replacement: replacementGlyphs[0][i])],
 				lineNumber: lineNumber
+				, ruleGroupID: nil
 			))
 		}
 		return rules
@@ -63,6 +64,7 @@ struct ContextualRule {
 				context: .before(contextGlyphs.map { $0[i % $0.count] }),
 				substitutions: [(target: targetGlyphs[0][i], replacement: replacementGlyphs[0][i])],
 				lineNumber: lineNumber
+				, ruleGroupID: nil
 			))
 		}
 		return rules
@@ -91,6 +93,7 @@ struct ContextualRule {
 				),
 				substitutions: [(target: targetGlyphs[0][i], replacement: replacementGlyphs[0][i])],
 				lineNumber: lineNumber
+				, ruleGroupID: nil
 			))
 		}
 		return rules
@@ -150,6 +153,8 @@ struct ContextualRule {
 	
 	// MARK: - Decomposition for Single Substitution
 	
+// MARK: - Decomposition for Single Substitution
+	
 	private func decomposeSingleSubstitution(
 		patternGlyphs: [[String]],
 		expandedSubs: [[(String, String)]]
@@ -157,6 +162,9 @@ struct ContextualRule {
 		
 		let firstSize = patternGlyphs[0].count
 		var allRules: [ExpandedContextualRule] = []
+		
+		// Generate unique group ID for this decomposed rule set
+		let groupID = "decomposed_\(lineNumber)"
 		
 		// Find which position in pattern contains the target
 		let targets = Set(expandedSubs[0].map { $0.0 })
@@ -180,59 +188,56 @@ struct ContextualRule {
 			let contextPattern = patternGlyphs.map { $0[i] }
 			let (target, replacement) = expandedSubs[0][i]
 			
-			// FIXED: Allocate unique temp glyph using line number + index
-			// This ensures uniqueness across different rules
 			let tempGlyph = "\(65000 + (lineNumber * 100) + i)"
 			
-			// Strategy depends on target position
 			if targetPosition == 0 {
-				// Target at start: when [TARGET] b c: TARGET => repl
-				// Decompose: before [b c]: TARGET => repl
+				// Target at start: use before context
 				let afterContext = Array(contextPattern[1...])
 				allRules.append(ExpandedContextualRule(
 					context: .before(afterContext),
 					substitutions: [(target, replacement)],
-					lineNumber: lineNumber
+					lineNumber: lineNumber,
+					ruleGroupID: groupID
 				))
 				
 			} else if targetPosition == patternGlyphs.count - 1 {
-				// Target at end: when a b [TARGET]: TARGET => repl
-				// Decompose: after [a b]: TARGET => repl
+				// Target at end: use after context
 				let beforeContext = Array(contextPattern[0..<targetPosition])
 				allRules.append(ExpandedContextualRule(
 					context: .after(beforeContext),
 					substitutions: [(target, replacement)],
-					lineNumber: lineNumber
+					lineNumber: lineNumber,
+					ruleGroupID: groupID
 				))
 				
 			} else {
-				// Target in middle: when a [TARGET] c: TARGET => repl
-				// Decompose into 2-step:
-				// Step 1: after [a]: TARGET => temp
-				// Step 2: between [temp] and [c]: temp => repl
-				
+				// Target in middle: two-step process
 				let beforeContext = Array(contextPattern[0..<targetPosition])
 				let afterContext = Array(contextPattern[(targetPosition + 1)...])
 				
-				// Rule 1: Mark with temp after seeing before-context
+				// Step 1: Mark with temp after seeing before-context
 				allRules.append(ExpandedContextualRule(
 					context: .after(beforeContext),
 					substitutions: [(target, tempGlyph)],
-					lineNumber: lineNumber
+					lineNumber: lineNumber,
+					ruleGroupID: groupID
 				))
 				
-				// Rule 2: Substitute temp when followed by after-context
+				// Step 2: Replace temp before seeing after-context
+				// FIX: Use "before" context, NOT "between"
 				allRules.append(ExpandedContextualRule(
-					context: .between(first: [tempGlyph], second: afterContext),
+					context: .before(afterContext),
 					substitutions: [(tempGlyph, replacement)],
-					lineNumber: lineNumber
+					lineNumber: lineNumber,
+					ruleGroupID: groupID
 				))
 				
-				// Rule 3: Cleanup temp if not followed by after-context
+				// Step 3: Cleanup temp if pattern incomplete
 				allRules.append(ExpandedContextualRule(
 					context: .cleanup(tempGlyph),
-					substitutions: [(tempGlyph, target)], // Restore original if pattern incomplete
-					lineNumber: lineNumber
+					substitutions: [(tempGlyph, target)],
+					lineNumber: lineNumber,
+					ruleGroupID: groupID
 				))
 			}
 		}
@@ -257,7 +262,8 @@ struct ContextualRule {
 			rules.append(ExpandedContextualRule(
 				context: .when(contextPattern),
 				substitutions: subs,
-				lineNumber: lineNumber
+				lineNumber: lineNumber,
+				ruleGroupID: nil
 			))
 		}
 		
@@ -288,12 +294,13 @@ struct ExpandedContextualRule {
 		case before([String])
 		case between(first: [String], second: [String])
 		case when([String])
-		case cleanup(String)  // NEW: for temp glyph cleanup
+		case cleanup(String)
 	}
 	
 	let context: ExpandedContext
 	let substitutions: [(target: String, replacement: String)]
 	let lineNumber: Int
+	let ruleGroupID: String?  // NEW: tracks which original rule this came from
 	
 	var needsMultiPass: Bool {
 		return substitutions.count > 1

@@ -273,50 +273,11 @@ extension ATIFGenerator {
         
         var subtableNumber = 0
         
-        // Group decomposed rules by temp glyph family to avoid collisions
-        var decomposedRuleSets: [[ExpandedContextualRule]] = []
-        var regularRules: [ExpandedContextualRule] = []
+        // Separate rules by type
+        let decomposedRules = singlePassRules.filter { $0.ruleGroupID != nil }
+        let regularRules = singlePassRules.filter { $0.ruleGroupID == nil }
         
-        for rule in singlePassRules {
-            let usesTemp = rule.substitutions.contains { sub in
-                let target = sub.target
-                let replacement = sub.replacement
-                return (target.count >= 5 && Int(target.prefix(2)) ?? 0 >= 65) ||
-                       (replacement.count >= 5 && Int(replacement.prefix(2)) ?? 0 >= 65)
-            }
-            
-            if usesTemp {
-                var tempGlyph: String? = nil
-                for sub in rule.substitutions {
-                    if sub.target.count >= 5, let val = Int(sub.target.prefix(2)), val >= 65 {
-                        tempGlyph = sub.target
-                        break
-                    }
-                    if sub.replacement.count >= 5, let val = Int(sub.replacement.prefix(2)), val >= 65 {
-                        tempGlyph = sub.replacement
-                        break
-                    }
-                }
-                
-                if let temp = tempGlyph {
-                    if let existingIndex = decomposedRuleSets.firstIndex(where: { set in
-                        set.contains { r in
-                            r.substitutions.contains { $0.target == temp || $0.replacement == temp }
-                        }
-                    }) {
-                        decomposedRuleSets[existingIndex].append(rule)
-                    } else {
-                        decomposedRuleSets.append([rule])
-                    }
-                } else {
-                    regularRules.append(rule)
-                }
-            } else {
-                regularRules.append(rule)
-            }
-        }
-        
-        // Group regular rules by context type
+        // Generate regular rules grouped by context type
         let groupedRegular = Dictionary(grouping: regularRules) { rule -> String in
             switch rule.context {
             case .after: return "after"
@@ -337,23 +298,58 @@ extension ATIFGenerator {
             subtableNumber += 1
         }
         
-        // Generate each decomposed rule set separately (keeps temp glyphs isolated)
-        for ruleSet in decomposedRuleSets {
-            let grouped = Dictionary(grouping: ruleSet) { rule -> String in
-                switch rule.context {
-                case .after: return "after"
-                case .before: return "before"
-                case .between: return "between"
-                case .when: return "when"
-                case .cleanup: return "cleanup"
-                }
+        // Generate decomposed rules - EACH GROUP SEPARATELY
+        var seenGroupIDs = Set<String>()
+        var orderedGroupIDs: [String] = []
+        for rule in decomposedRules {
+            if let groupID = rule.ruleGroupID, !seenGroupIDs.contains(groupID) {
+                seenGroupIDs.insert(groupID)
+                orderedGroupIDs.append(groupID)
             }
+        }
+        
+        for groupID in orderedGroupIDs.sorted() {
+            let rulesInGroup = decomposedRules.filter { $0.ruleGroupID == groupID }
             
-            for (contextType, rulesForType) in grouped.sorted(by: { $0.key < $1.key }) {
+            let afterRules = rulesInGroup.filter { if case .after = $0.context { return true }; return false }
+            let beforeRules = rulesInGroup.filter { if case .before = $0.context { return true }; return false }
+            let betweenRules = rulesInGroup.filter { if case .between = $0.context { return true }; return false }
+            let cleanupRulesInGroup = rulesInGroup.filter { if case .cleanup = $0.context { return true }; return false }
+            
+            if !afterRules.isEmpty {
                 if subtableNumber > 0 { output += "\n" }
                 output += try generateContextualSubtable(
-                    rules: rulesForType,
-                    contextType: contextType,
+                    rules: afterRules,
+                    contextType: "after",
+                    subtableNumber: subtableNumber
+                )
+                subtableNumber += 1
+            }
+            
+            if !beforeRules.isEmpty {
+                if subtableNumber > 0 { output += "\n" }
+                output += try generateContextualSubtable(
+                    rules: beforeRules,
+                    contextType: "before",
+                    subtableNumber: subtableNumber
+                )
+                subtableNumber += 1
+            }
+            
+            if !betweenRules.isEmpty {
+                if subtableNumber > 0 { output += "\n" }
+                output += try generateContextualSubtable(
+                    rules: betweenRules,
+                    contextType: "between",
+                    subtableNumber: subtableNumber
+                )
+                subtableNumber += 1
+            }
+            
+            if !cleanupRulesInGroup.isEmpty {
+                if subtableNumber > 0 { output += "\n" }
+                output += try generateCleanupSubtable(
+                    rules: cleanupRulesInGroup,
                     subtableNumber: subtableNumber
                 )
                 subtableNumber += 1
@@ -370,7 +366,7 @@ extension ATIFGenerator {
             subtableNumber += 3
         }
         
-        // Generate cleanup rules
+        // Generate remaining cleanup rules
         if !cleanupRules.isEmpty {
             if subtableNumber > 0 { output += "\n" }
             output += try generateCleanupSubtable(
@@ -438,7 +434,7 @@ extension ATIFGenerator {
         output += "    };\n\n"
         
         output += "    transition DoSubstitution {\n"
-        output += "        change state to Start;\n"
+        output += "        change state to SawContext;\n"  // ← CORRECT
         output += "        current glyph substitution: SubstTarget;\n"
         output += "    };\n\n"
         
@@ -490,6 +486,7 @@ extension ATIFGenerator {
         output += "    transition MarkTarget {\n"
         output += "        change state to SawTarget;\n"
         output += "        mark glyph;\n"
+        output += "        marked glyph substitution: SubstTarget;\n" 
         output += "    };\n\n"
         
         output += "    transition DoSubstitution {\n"
@@ -557,6 +554,7 @@ extension ATIFGenerator {
         output += "    transition MarkTarget {\n"
         output += "        change state to SawTarget;\n"
         output += "        mark glyph;\n"
+        output += "        marked glyph substitution: SubstTarget;\n" 
         output += "    };\n\n"
         
         output += "    transition DoSubstitution {\n"
