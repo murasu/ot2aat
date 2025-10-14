@@ -287,23 +287,71 @@ extension MIFGenerator {
             expandedRules.append(contentsOf: expanded)
         }
         
-        // Separate multi-pass rules
-        let singlePassRules = expandedRules.filter { !$0.needsMultiPass }
-        let multiPassRules = expandedRules.filter { $0.needsMultiPass }
+        // Separate into categories
+        let cleanupRules = expandedRules.filter { $0.isCleanup }
+        let multiPassRules = expandedRules.filter { $0.needsMultiPass && !$0.isCleanup }
+        let singlePassRules = expandedRules.filter { !$0.needsMultiPass && !$0.isCleanup }
         
         var tableNumber = 0
         
-        // Generate single-pass rules grouped by context type
-        let groupedSingle = Dictionary(grouping: singlePassRules) { rule -> String in
+        // Group decomposed rules by their temp glyph family to avoid collisions
+        var decomposedRuleSets: [[ExpandedContextualRule]] = []
+        var regularRules: [ExpandedContextualRule] = []
+        
+        for rule in singlePassRules {
+            // Check if this rule uses a temp glyph (starts with 65, 66, 67, etc.)
+            let usesTemp = rule.substitutions.contains { sub in
+                let target = sub.target
+                let replacement = sub.replacement
+                return (target.count >= 5 && Int(target.prefix(2)) ?? 0 >= 65) ||
+                       (replacement.count >= 5 && Int(replacement.prefix(2)) ?? 0 >= 65)
+            }
+            
+            if usesTemp {
+                // Extract the temp glyph to group related rules
+                var tempGlyph: String? = nil
+                for sub in rule.substitutions {
+                    if sub.target.count >= 5, let val = Int(sub.target.prefix(2)), val >= 65 {
+                        tempGlyph = sub.target
+                        break
+                    }
+                    if sub.replacement.count >= 5, let val = Int(sub.replacement.prefix(2)), val >= 65 {
+                        tempGlyph = sub.replacement
+                        break
+                    }
+                }
+                
+                if let temp = tempGlyph {
+                    // Find existing set or create new one
+                    if let existingIndex = decomposedRuleSets.firstIndex(where: { set in
+                        set.contains { r in
+                            r.substitutions.contains { $0.target == temp || $0.replacement == temp }
+                        }
+                    }) {
+                        decomposedRuleSets[existingIndex].append(rule)
+                    } else {
+                        decomposedRuleSets.append([rule])
+                    }
+                } else {
+                    regularRules.append(rule)
+                }
+            } else {
+                regularRules.append(rule)
+            }
+        }
+        
+        // Generate regular rules grouped by context type
+        let groupedRegular = Dictionary(grouping: regularRules) { rule -> String in
             switch rule.context {
             case .after: return "after"
             case .before: return "before"
             case .between: return "between"
             case .when: return "when"
+            case .cleanup: return "cleanup"
             }
         }
         
-        for (contextType, rulesForType) in groupedSingle.sorted(by: { $0.key < $1.key }) {
+        for (contextType, rulesForType) in groupedRegular.sorted(by: { $0.key < $1.key }) {
             if tableNumber > 0 { output += "\n" }
             output += try generateContextualSubtable(
                 rules: rulesForType,
@@ -315,7 +363,32 @@ extension MIFGenerator {
             tableNumber += 1
         }
         
-        // Generate multi-pass rules (each gets multiple tables)
+        // Generate each decomposed rule set separately (keeps temp glyphs isolated)
+        for ruleSet in decomposedRuleSets {
+            let grouped = Dictionary(grouping: ruleSet) { rule -> String in
+                switch rule.context {
+                case .after: return "after"
+                case .before: return "before"
+                case .between: return "between"
+                case .when: return "when"
+                case .cleanup: return "cleanup"
+                }
+            }
+            
+            for (contextType, rulesForType) in grouped.sorted(by: { $0.key < $1.key }) {
+                if tableNumber > 0 { output += "\n" }
+                output += try generateContextualSubtable(
+                    rules: rulesForType,
+                    contextType: contextType,
+                    featureName: featureName,
+                    selectorNumber: selectorNumber,
+                    tableNumber: tableNumber
+                )
+                tableNumber += 1
+            }
+        }
+        
+        // Generate multi-pass rules (each gets 3 tables)
         for multiPassRule in multiPassRules {
             if tableNumber > 0 { output += "\n" }
             output += try generateMultiPassTables(
@@ -324,7 +397,18 @@ extension MIFGenerator {
                 selectorNumber: selectorNumber,
                 startTableNumber: tableNumber
             )
-            tableNumber += 3 // Mark, substitute, cleanup
+            tableNumber += 3
+        }
+        
+        // Generate cleanup rules (noncontextual)
+        if !cleanupRules.isEmpty {
+            if tableNumber > 0 { output += "\n" }
+            output += try generateCleanupTableForContextual(
+                rules: cleanupRules,
+                featureName: featureName,
+                selectorNumber: selectorNumber,
+                tableNumber: tableNumber
+            )
         }
         
         return output
@@ -376,7 +460,6 @@ extension MIFGenerator {
     private static func generateAfterTable(rules: [ExpandedContextualRule]) throws -> String {
         var output = ""
         
-        // Collect glyphs
         var contextGlyphs = Set<String>()
         var targetGlyphs = Set<String>()
         
@@ -386,23 +469,19 @@ extension MIFGenerator {
             targetGlyphs.insert(rule.substitutions[0].target)
         }
         
-        // Classes
         output += "ContextGlyphs\t\t" + contextGlyphs.sorted().joined(separator: " ") + "\n"
         output += "TargetGlyphs\t\t" + targetGlyphs.sorted().joined(separator: " ") + "\n\n"
         
-        // State array
         output += "\t\t\t\tEOT\tOOB\tDEL\tEOL\tContextGlyphs\tTargetGlyphs\n"
         output += "StartText\t\t1\t1\t1\t1\t2\t\t\t\t1\n"
         output += "StartLine\t\t1\t1\t1\t1\t2\t\t\t\t1\n"
         output += "SawContext\t\t1\t1\t2\t1\t2\t\t\t\t3\n\n"
         
-        // Transitions
         output += "\tGoTo\t\t\tMark?\tAdvance?\tSubstMark\tSubstCurrent\n"
         output += "1\tStartText\t\tno\t\tyes\t\t\tnone\t\tnone\n"
         output += "2\tSawContext\t\tno\t\tyes\t\t\tnone\t\tnone\n"
         output += "3\tStartText\t\tno\t\tyes\t\t\tnone\t\tdoSubst\n\n"
         
-        // Substitutions
         output += "doSubst\n"
         for rule in rules {
             guard case .after = rule.context else { continue }
@@ -492,13 +571,11 @@ extension MIFGenerator {
         return output
     }
     
-    // MARK: - When Context (single substitution)
+    // MARK: - When Context
     
-private static func generateWhenTable(rules: [ExpandedContextualRule]) throws -> String {
+    private static func generateWhenTable(rules: [ExpandedContextualRule]) throws -> String {
         var output = ""
         
-        // For 'when' context, we need to match the full pattern
-        // Collect all unique glyphs from patterns
         var allPatternGlyphs = Set<String>()
         
         for rule in rules {
@@ -508,10 +585,6 @@ private static func generateWhenTable(rules: [ExpandedContextualRule]) throws ->
         
         output += "PatternGlyphs\t\t" + allPatternGlyphs.sorted().joined(separator: " ") + "\n\n"
         
-        // Build a more sophisticated state machine
-        // We need states for each position in the pattern matching
-        
-        // Simplified approach: mark as we go through pattern
         output += "\t\t\t\tEOT\tOOB\tDEL\tEOL\tPatternGlyphs\n"
         output += "StartText\t\t1\t1\t1\t1\t2\n"
         output += "StartLine\t\t1\t1\t1\t1\t2\n"
@@ -522,8 +595,7 @@ private static func generateWhenTable(rules: [ExpandedContextualRule]) throws ->
         output += "2\tMatching\t\tno\t\tyes\t\t\tnone\t\tnone\n"
         output += "3\tMatching\t\tyes\t\tyes\t\t\tdoSubst\t\tnone\n\n"
         
-        // Build substitution list
-        // Only include glyphs that are actually being substituted
+        output += "doSubst\n"
         var substitutions: [(String, String)] = []
         for rule in rules {
             guard case .when = rule.context else { continue }
@@ -534,15 +606,14 @@ private static func generateWhenTable(rules: [ExpandedContextualRule]) throws ->
             }
         }
         
-        output += "doSubst\n"
         for (target, replacement) in substitutions {
             output += "\t\(target)\t\t\(replacement)\n"
         }
         
         return output
     }
-        
-    // MARK: - Multi-pass for when context with multiple substitutions
+    
+    // MARK: - Multi-pass
     
     private static func generateMultiPassTables(
         rule: ExpandedContextualRule,
@@ -556,11 +627,9 @@ private static func generateWhenTable(rules: [ExpandedContextualRule]) throws ->
             throw OT2AATError.generationFailed("Multi-pass only for 'when' context")
         }
         
-        // Generate temp glyph IDs
         let tempGlyphs = (0..<(rule.substitutions.count - 1)).map { 65000 + $0 }
         
-        // Table 1: Mark positions with temp glyphs
-        output += try generateMarkingTable(
+        output += try generateMarkingTableForMultiPass(
             pattern: pattern,
             substitutions: rule.substitutions,
             tempGlyphs: tempGlyphs,
@@ -571,8 +640,7 @@ private static func generateWhenTable(rules: [ExpandedContextualRule]) throws ->
         
         output += "\n"
         
-        // Table 2: Final substitutions
-        output += try generateFinalSubstitutionTable(
+        output += try generateFinalSubstitutionTableForMultiPass(
             tempGlyphs: tempGlyphs,
             substitutions: rule.substitutions,
             featureName: featureName,
@@ -582,8 +650,7 @@ private static func generateWhenTable(rules: [ExpandedContextualRule]) throws ->
         
         output += "\n"
         
-        // Table 3: Cleanup temp glyphs
-        output += try generateCleanupTable(
+        output += try generateCleanupTableForMultiPass(
             tempGlyphs: tempGlyphs,
             featureName: featureName,
             selectorNumber: selectorNumber,
@@ -593,7 +660,7 @@ private static func generateWhenTable(rules: [ExpandedContextualRule]) throws ->
         return output
     }
     
-    private static func generateMarkingTable(
+    private static func generateMarkingTableForMultiPass(
         pattern: [String],
         substitutions: [(String, String)],
         tempGlyphs: [Int],
@@ -604,7 +671,7 @@ private static func generateWhenTable(rules: [ExpandedContextualRule]) throws ->
         var output = ""
         
         output += "// " + String(repeating: "-", count: 79) + "\n"
-        output += "// TABLE \(tableNumber): Multi-pass marking (when context)\n"
+        output += "// TABLE \(tableNumber): Multi-pass marking\n"
         output += "// " + String(repeating: "-", count: 79) + "\n\n"
         
         output += "Type\t\t\t\tContextual\n"
@@ -635,7 +702,7 @@ private static func generateWhenTable(rules: [ExpandedContextualRule]) throws ->
         return output
     }
     
-    private static func generateFinalSubstitutionTable(
+    private static func generateFinalSubstitutionTableForMultiPass(
         tempGlyphs: [Int],
         substitutions: [(String, String)],
         featureName: String,
@@ -667,7 +734,7 @@ private static func generateWhenTable(rules: [ExpandedContextualRule]) throws ->
         return output
     }
     
-    private static func generateCleanupTable(
+    private static func generateCleanupTableForMultiPass(
         tempGlyphs: [Int],
         featureName: String,
         selectorNumber: Int,
@@ -691,6 +758,39 @@ private static func generateWhenTable(rules: [ExpandedContextualRule]) throws ->
         
         for tempGlyph in tempGlyphs {
             output += "\(tempGlyph)\t\tDEL\n"
+        }
+        
+        return output
+    }
+    
+    // MARK: - Cleanup for decomposed patterns
+    
+    private static func generateCleanupTableForContextual(
+        rules: [ExpandedContextualRule],
+        featureName: String,
+        selectorNumber: Int,
+        tableNumber: Int
+    ) throws -> String {
+        var output = ""
+        
+        output += "// " + String(repeating: "-", count: 79) + "\n"
+        output += "// TABLE \(tableNumber): Cleanup incomplete patterns\n"
+        output += "// " + String(repeating: "-", count: 79) + "\n\n"
+        
+        output += "Type\t\t\t\tNoncontextual\n"
+        output += "Name\t\t\t\t\(featureName)\n"
+        output += "Namecode\t\t\t8\n"
+        output += "Setting\t\t\t\t\(featureName)\n"
+        output += "Settingcode\t\t\t\(selectorNumber)\n"
+        output += "Default\t\t\t\tyes\n"
+        output += "Orientation\t\t\tHV\n"
+        output += "Forward\t\t\t\tyes\n"
+        output += "Exclusive\t\t\tno\n\n"
+        
+        for rule in rules {
+            guard case .cleanup = rule.context else { continue }
+            let (target, replacement) = rule.substitutions[0]
+            output += "\(target)\t\t\(replacement)\n"
         }
         
         return output

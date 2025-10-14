@@ -27,7 +27,6 @@ struct ContextualRule {
 		let targetGlyphs = try resolveElements([substitutions[0].target], using: registry)
 		let replacementGlyphs = try resolveElements([substitutions[0].replacement], using: registry)
 		
-		// Check sizes match
 		guard targetGlyphs[0].count == replacementGlyphs[0].count else {
 			throw OT2AATError.invalidRule(
 				"Line \(lineNumber): Target and replacement class sizes must match (\(targetGlyphs[0].count) vs \(replacementGlyphs[0].count))"
@@ -97,12 +96,12 @@ struct ContextualRule {
 		return rules
 	}
 	
-	// MARK: - When Context
+	// MARK: - When Context (with decomposition)
 	
 	private func expandWhen(pattern: [RuleElement], using registry: GlyphClassRegistry) throws -> [ExpandedContextualRule] {
 		let patternGlyphs = try resolveElements(pattern, using: registry)
 		
-		// For when context, all classes must have same size
+		// Verify all classes have same size
 		let firstSize = patternGlyphs[0].count
 		for (idx, list) in patternGlyphs.enumerated() {
 			guard list.count == firstSize else {
@@ -133,8 +132,124 @@ struct ContextualRule {
 			expandedSubs.append(zip(targets, replacements).map { ($0, $1) })
 		}
 		
-		// Generate rules
+		// DECISION POINT: Decompose or multi-pass?
+		if substitutions.count == 1 {
+			// Single substitution - decompose into simpler contexts for full verification!
+			return try decomposeSingleSubstitution(
+				patternGlyphs: patternGlyphs,
+				expandedSubs: expandedSubs
+			)
+		} else {
+			// Multiple substitutions - use multi-pass
+			return try expandMultiSubstitutionWhen(
+				patternGlyphs: patternGlyphs,
+				expandedSubs: expandedSubs
+			)
+		}
+	}
+	
+	// MARK: - Decomposition for Single Substitution
+	
+	private func decomposeSingleSubstitution(
+		patternGlyphs: [[String]],
+		expandedSubs: [[(String, String)]]
+	) throws -> [ExpandedContextualRule] {
+		
+		let firstSize = patternGlyphs[0].count
+		var allRules: [ExpandedContextualRule] = []
+		
+		// Find which position in pattern contains the target
+		let targets = Set(expandedSubs[0].map { $0.0 })
+		var targetPosition: Int = -1
+		
+		for (idx, positionGlyphs) in patternGlyphs.enumerated() {
+			if Set(positionGlyphs).intersection(targets).count > 0 {
+				targetPosition = idx
+				break
+			}
+		}
+		
+		guard targetPosition >= 0 else {
+			throw OT2AATError.invalidRule(
+				"Line \(lineNumber): Substitution target not found in 'when' pattern"
+			)
+		}
+		
+		// Decompose for each combination
+		for i in 0..<firstSize {
+			let contextPattern = patternGlyphs.map { $0[i] }
+			let (target, replacement) = expandedSubs[0][i]
+			
+			// FIXED: Allocate unique temp glyph using line number + index
+			// This ensures uniqueness across different rules
+			let tempGlyph = "\(65000 + (lineNumber * 100) + i)"
+			
+			// Strategy depends on target position
+			if targetPosition == 0 {
+				// Target at start: when [TARGET] b c: TARGET => repl
+				// Decompose: before [b c]: TARGET => repl
+				let afterContext = Array(contextPattern[1...])
+				allRules.append(ExpandedContextualRule(
+					context: .before(afterContext),
+					substitutions: [(target, replacement)],
+					lineNumber: lineNumber
+				))
+				
+			} else if targetPosition == patternGlyphs.count - 1 {
+				// Target at end: when a b [TARGET]: TARGET => repl
+				// Decompose: after [a b]: TARGET => repl
+				let beforeContext = Array(contextPattern[0..<targetPosition])
+				allRules.append(ExpandedContextualRule(
+					context: .after(beforeContext),
+					substitutions: [(target, replacement)],
+					lineNumber: lineNumber
+				))
+				
+			} else {
+				// Target in middle: when a [TARGET] c: TARGET => repl
+				// Decompose into 2-step:
+				// Step 1: after [a]: TARGET => temp
+				// Step 2: between [temp] and [c]: temp => repl
+				
+				let beforeContext = Array(contextPattern[0..<targetPosition])
+				let afterContext = Array(contextPattern[(targetPosition + 1)...])
+				
+				// Rule 1: Mark with temp after seeing before-context
+				allRules.append(ExpandedContextualRule(
+					context: .after(beforeContext),
+					substitutions: [(target, tempGlyph)],
+					lineNumber: lineNumber
+				))
+				
+				// Rule 2: Substitute temp when followed by after-context
+				allRules.append(ExpandedContextualRule(
+					context: .between(first: [tempGlyph], second: afterContext),
+					substitutions: [(tempGlyph, replacement)],
+					lineNumber: lineNumber
+				))
+				
+				// Rule 3: Cleanup temp if not followed by after-context
+				allRules.append(ExpandedContextualRule(
+					context: .cleanup(tempGlyph),
+					substitutions: [(tempGlyph, target)], // Restore original if pattern incomplete
+					lineNumber: lineNumber
+				))
+			}
+		}
+		
+		return allRules
+	}
+	
+	// MARK: - Multi-substitution (existing logic)
+	
+	private func expandMultiSubstitutionWhen(
+		patternGlyphs: [[String]],
+		expandedSubs: [[(String, String)]]
+	) throws -> [ExpandedContextualRule] {
+		
+		let firstSize = patternGlyphs[0].count
 		var rules: [ExpandedContextualRule] = []
+		
 		for i in 0..<firstSize {
 			let contextPattern = patternGlyphs.map { $0[i] }
 			let subs = expandedSubs.map { $0[i] }
@@ -173,6 +288,7 @@ struct ExpandedContextualRule {
 		case before([String])
 		case between(first: [String], second: [String])
 		case when([String])
+		case cleanup(String)  // NEW: for temp glyph cleanup
 	}
 	
 	let context: ExpandedContext
@@ -181,5 +297,12 @@ struct ExpandedContextualRule {
 	
 	var needsMultiPass: Bool {
 		return substitutions.count > 1
+	}
+	
+	var isCleanup: Bool {
+		if case .cleanup = context {
+			return true
+		}
+		return false
 	}
 }

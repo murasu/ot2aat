@@ -100,6 +100,8 @@ struct ContextSubCommand: ParsableCommand {
                         contextDesc = "between \(first.joined(separator: " ")) and \(second.joined(separator: " "))"
                     case .when(let pattern):
                         contextDesc = "when \(pattern.joined(separator: " "))"
+                    case .cleanup(let tempGlyph):
+                        contextDesc = "cleanup temp \(tempGlyph)"
                     }
                     
                     let sub = first.substitutions[0]

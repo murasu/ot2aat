@@ -647,13 +647,31 @@ when @a @b @c @d @e @f @g @h @i @j: ... # At max limit!
 
 ---
 
-## Limitations
+## Pattern Verification
 
-1. **Pattern length**: Maximum 10 elements per pattern
-2. **Marking**: AAT can only mark one position at a time (tool handles via multi-pass)
-3. **Class sizes**: Must match for position-wise expansion
-4. **Single rule CLI**: No classes, no multiple substitutions
-5. **Lookahead**: Limited to pattern length (no arbitrary lookahead)
+### Full Sequence Matching
+
+All context types provide **full pattern verification**:
+
+✅ **after context** - Verifies the preceding pattern is complete  
+✅ **before context** - Verifies the following pattern is complete  
+✅ **between context** - Verifies both surrounding patterns  
+✅ **when context (single)** - Verifies the complete sequence before substituting  
+✅ **when context (multiple)** - Uses multi-pass with pattern verification  
+
+**Example:**
+```ruby
+when t h e: h => h.special
+```
+
+This will ONLY substitute `h` when it appears in the exact sequence "the". Typing:
+- "the" → t + h.special + e ✅
+- "th" → t + h (no change, pattern incomplete) ✅
+- "he" → h + e (no change, no 't' before) ✅
+
+**Implementation Note:** Single-target `when` rules are automatically decomposed 
+into simpler `after`/`between` contexts internally for optimal performance and 
+correctness. This is transparent to the user.
 
 ---
 

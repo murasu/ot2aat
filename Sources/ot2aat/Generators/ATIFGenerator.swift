@@ -266,23 +266,68 @@ extension ATIFGenerator {
             expandedRules.append(contentsOf: expanded)
         }
         
-        // Separate single-pass and multi-pass
-        let singlePassRules = expandedRules.filter { !$0.needsMultiPass }
-        let multiPassRules = expandedRules.filter { $0.needsMultiPass }
+        // Separate into categories
+        let cleanupRules = expandedRules.filter { $0.isCleanup }
+        let multiPassRules = expandedRules.filter { $0.needsMultiPass && !$0.isCleanup }
+        let singlePassRules = expandedRules.filter { !$0.needsMultiPass && !$0.isCleanup }
         
         var subtableNumber = 0
         
-        // Group single-pass by context type
-        let groupedSingle = Dictionary(grouping: singlePassRules) { rule -> String in
+        // Group decomposed rules by temp glyph family to avoid collisions
+        var decomposedRuleSets: [[ExpandedContextualRule]] = []
+        var regularRules: [ExpandedContextualRule] = []
+        
+        for rule in singlePassRules {
+            let usesTemp = rule.substitutions.contains { sub in
+                let target = sub.target
+                let replacement = sub.replacement
+                return (target.count >= 5 && Int(target.prefix(2)) ?? 0 >= 65) ||
+                       (replacement.count >= 5 && Int(replacement.prefix(2)) ?? 0 >= 65)
+            }
+            
+            if usesTemp {
+                var tempGlyph: String? = nil
+                for sub in rule.substitutions {
+                    if sub.target.count >= 5, let val = Int(sub.target.prefix(2)), val >= 65 {
+                        tempGlyph = sub.target
+                        break
+                    }
+                    if sub.replacement.count >= 5, let val = Int(sub.replacement.prefix(2)), val >= 65 {
+                        tempGlyph = sub.replacement
+                        break
+                    }
+                }
+                
+                if let temp = tempGlyph {
+                    if let existingIndex = decomposedRuleSets.firstIndex(where: { set in
+                        set.contains { r in
+                            r.substitutions.contains { $0.target == temp || $0.replacement == temp }
+                        }
+                    }) {
+                        decomposedRuleSets[existingIndex].append(rule)
+                    } else {
+                        decomposedRuleSets.append([rule])
+                    }
+                } else {
+                    regularRules.append(rule)
+                }
+            } else {
+                regularRules.append(rule)
+            }
+        }
+        
+        // Group regular rules by context type
+        let groupedRegular = Dictionary(grouping: regularRules) { rule -> String in
             switch rule.context {
             case .after: return "after"
             case .before: return "before"
             case .between: return "between"
             case .when: return "when"
+            case .cleanup: return "cleanup"
             }
         }
         
-        for (contextType, rulesForType) in groupedSingle.sorted(by: { $0.key < $1.key }) {
+        for (contextType, rulesForType) in groupedRegular.sorted(by: { $0.key < $1.key }) {
             if subtableNumber > 0 { output += "\n" }
             output += try generateContextualSubtable(
                 rules: rulesForType,
@@ -292,14 +337,46 @@ extension ATIFGenerator {
             subtableNumber += 1
         }
         
+        // Generate each decomposed rule set separately (keeps temp glyphs isolated)
+        for ruleSet in decomposedRuleSets {
+            let grouped = Dictionary(grouping: ruleSet) { rule -> String in
+                switch rule.context {
+                case .after: return "after"
+                case .before: return "before"
+                case .between: return "between"
+                case .when: return "when"
+                case .cleanup: return "cleanup"
+                }
+            }
+            
+            for (contextType, rulesForType) in grouped.sorted(by: { $0.key < $1.key }) {
+                if subtableNumber > 0 { output += "\n" }
+                output += try generateContextualSubtable(
+                    rules: rulesForType,
+                    contextType: contextType,
+                    subtableNumber: subtableNumber
+                )
+                subtableNumber += 1
+            }
+        }
+        
         // Generate multi-pass rules
         for multiPassRule in multiPassRules {
             if subtableNumber > 0 { output += "\n" }
-            output += try ATIFGenerator.generateMultiPassSubtablesForContextual(
+            output += try generateMultiPassSubtablesForContextual(
                 rule: multiPassRule,
                 startSubtableNumber: subtableNumber
             )
             subtableNumber += 3
+        }
+        
+        // Generate cleanup rules
+        if !cleanupRules.isEmpty {
+            if subtableNumber > 0 { output += "\n" }
+            output += try generateCleanupSubtable(
+                rules: cleanupRules,
+                subtableNumber: subtableNumber
+            )
         }
         
         return output
@@ -500,7 +577,7 @@ extension ATIFGenerator {
         return output
     }
     
-    // MARK: - When Context (FIXED - no overlap)
+    // MARK: - When Context
     
     private static func generateWhenSubtable(
         rules: [ExpandedContextualRule],
@@ -573,7 +650,6 @@ extension ATIFGenerator {
         
         let tempGlyphs = (0..<(rule.substitutions.count - 1)).map { 65000 + $0 }
         
-        // Subtable 1: Marking
         output += try generateMarkingSubtableForContextual(
             pattern: pattern,
             substitutions: rule.substitutions,
@@ -583,7 +659,6 @@ extension ATIFGenerator {
         
         output += "\n"
         
-        // Subtable 2: Final substitutions
         output += try generateFinalSubstitutionSubtableForContextual(
             tempGlyphs: tempGlyphs,
             substitutions: rule.substitutions,
@@ -592,8 +667,7 @@ extension ATIFGenerator {
         
         output += "\n"
         
-        // Subtable 3: Cleanup
-        output += try generateCleanupSubtableForContextual(
+        output += try generateCleanupSubtableForMultiPass(
             tempGlyphs: tempGlyphs,
             subtableNumber: startSubtableNumber + 2
         )
@@ -655,7 +729,7 @@ extension ATIFGenerator {
         return output
     }
     
-    private static func generateCleanupSubtableForContextual(
+    private static func generateCleanupSubtableForMultiPass(
         tempGlyphs: [Int],
         subtableNumber: Int
     ) throws -> String {
@@ -672,5 +746,28 @@ extension ATIFGenerator {
         
         return output
     }
+    
+    // MARK: - Cleanup Subtable
+    
+    private static func generateCleanupSubtable(
+        rules: [ExpandedContextualRule],
+        subtableNumber: Int
+    ) throws -> String {
+        var output = ""
+        
+        output += "// Noncontextual subtable \(subtableNumber) (cleanup incomplete patterns)\n"
+        output += "noncontextual subtable (SmartSwash, WordInitialSwashes) {\n"
+        
+        for rule in rules {
+            guard case .cleanup = rule.context else { continue }
+            let (target, replacement) = rule.substitutions[0]
+            output += "    \(target) => \(replacement);\n"
+        }
+        
+        output += "};\n"
+        
+        return output
+    }
 }
+
 
