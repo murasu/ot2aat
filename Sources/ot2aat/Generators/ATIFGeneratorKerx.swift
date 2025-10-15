@@ -27,6 +27,7 @@ struct ATIFGeneratorKerx {
 			//if tableNumber > 0 { output += "\n" }
 			output += try generateDistancePairs(
 				rules: rules.distanceRules,
+				glyphClasses: rules.glyphClasses,
 				tableNumber: tableNumber
 			)
 			tableNumber += 1
@@ -85,6 +86,7 @@ struct ATIFGeneratorKerx {
 	/// Generate Type 0 distance kerning (simple pairs)
 	private static func generateDistancePairs(
 		rules: [DistanceRule],
+		glyphClasses: [GlyphClass],
 		tableNumber: Int
 	) throws -> String {
 		var output = ""
@@ -93,8 +95,13 @@ struct ATIFGeneratorKerx {
 		output += "// Table \(tableNumber): Distance kerning (simple pairs)\n"
 		output += "// " + String(repeating: "-", count: 79) + "\n\n"
 		
+		// Create registry from stored classes
+		var registry = GlyphClassRegistry()
+		for glyphClass in glyphClasses {
+			try registry.register(glyphClass)
+		}
+		
 		// Expand all rules to glyph pairs
-		let registry = GlyphClassRegistry()
 		var allPairs: [(String, String, Int)] = []
 		
 		for rule in rules {

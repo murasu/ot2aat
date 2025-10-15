@@ -633,7 +633,8 @@ extension RuleParser {
             baseMarks: baseMarks,
             ligatures: ligatures,
             distanceRules: distanceRules,
-            distanceMatrices: distanceMatrices
+            distanceMatrices: distanceMatrices,
+            glyphClasses: registry.allClasses() 
         )
         
         // Validate all rules
@@ -644,10 +645,10 @@ extension RuleParser {
     
     // MARK: - Mark Class Parser
     
-    /// Parse @markclass definition
+/// Parse @markclass definition
     /// Format: @markclass NAME <x, y>
     ///             glyph1 glyph2 glyph3
-    private static func parseMarkClass(_ lines: [String], startIndex: Int) throws -> (MarkClass, Int) {
+private static func parseMarkClass(_ lines: [String], startIndex: Int) throws -> (MarkClass, Int) {
         let lineNum = startIndex + 1
         let firstLine = lines[startIndex].trimmingCharacters(in: .whitespaces)
         
@@ -681,13 +682,14 @@ extension RuleParser {
             if parts[i].contains("<") {
                 foundStart = true
                 anchorStr = parts[i]
-                glyphStartIndex = i + 1
+                glyphStartIndex = i + 1  // Tentatively set
             } else if foundStart && !foundEnd {
                 anchorStr += " " + parts[i]
             }
             
             if parts[i].contains(">") {
                 foundEnd = true
+                glyphStartIndex = i + 1  // UPDATE: Set to position after '>'
                 break
             }
         }

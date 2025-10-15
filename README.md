@@ -116,6 +116,29 @@ ot2aat one2many -atif \
     --selector 0 \
     -o output.atif
 ```
+## Converting from OpenType
+
+If you have existing OpenType mark positioning rules in AFDKO `.fea` format, use the included Python converter:
+```bash
+# Convert OpenType to ot2aat format
+python3 gposfea2kerxaar.py marks.fea marks.aar
+
+# Generate ATIF
+ot2aat markpos --atif -i marks.aar -f "Marks" --selector 0 -o marks.atif
+
+# Add to font
+ftxenhancer --atif marks.atif font.ttf
+```
+
+See [Conversion-Tools.md](Conversion-Tools.md) for detailed documentation.
+
+### Conversion Workflow Diagram
+```
+OpenType .fea          ot2aat .aar           ATIF              Font
+─────────────         ─────────────        ──────           ──────
+marks.fea      →      marks.aar      →     marks.atif  →    font.ttf
+              (Python)               (ot2aat)         (ftxenhancer)
+```
 
 ## Project Structure
 

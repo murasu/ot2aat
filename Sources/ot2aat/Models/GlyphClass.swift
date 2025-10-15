@@ -48,3 +48,9 @@ struct GlyphClassRegistry {
 		return Array(classes.values)
 	}
 }
+
+extension GlyphClassRegistry {
+	func allClasses() -> [GlyphClass] {
+		return Array(classes.values)
+	}
+}

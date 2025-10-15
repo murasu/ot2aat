@@ -265,19 +265,22 @@ struct MarkPositioningRules {
 	let ligatures: [LigatureGlyph]
 	let distanceRules: [DistanceRule]
 	let distanceMatrices: [DistanceMatrix]
+	let glyphClasses: [GlyphClass] 
 	
 	init(markClasses: [MarkClass] = [],
 		 bases: [BaseGlyph] = [],
 		 baseMarks: [BaseMarkGlyph] = [],
 		 ligatures: [LigatureGlyph] = [],
 		 distanceRules: [DistanceRule] = [],
-		 distanceMatrices: [DistanceMatrix] = []) {
+		 distanceMatrices: [DistanceMatrix] = [],
+		 glyphClasses: [GlyphClass] = []) {
 		self.markClasses = markClasses
 		self.bases = bases
 		self.baseMarks = baseMarks
 		self.ligatures = ligatures
 		self.distanceRules = distanceRules
 		self.distanceMatrices = distanceMatrices
+		self.glyphClasses = glyphClasses
 	}
 	
 	/// Validate all rules
