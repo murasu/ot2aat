@@ -374,10 +374,16 @@ struct KIFGenerator {
 		output += "PointType\t\t\tAnchorPoints\n"
 		output += "Forward\t\t\t\tno\n\n"
 		
+		// Determine MAXIMUM component count
+		let componentCount = ligatures.compactMap { $0.componentCount }.max() ?? 0
+		guard componentCount > 0 else {
+			throw OT2AATError.generationFailed("No ligatures or components")
+		}
+		/*
 		guard let firstLig = ligatures.first,
 			  let componentCount = firstLig.componentCount else {
 			throw OT2AATError.generationFailed("No ligatures or components")
-		}
+		} */
 		
 		let usedSemantics = Set(ligatures.flatMap { $0.componentAnchors.keys })
 		let usedOrderedSemantics = orderedSemantics.filter { usedSemantics.contains($0) }

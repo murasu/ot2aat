@@ -369,10 +369,15 @@ struct ATIFGeneratorKerx {
 		output += "    scan glyphs backward;\n\n"
 		
 		// Determine component count
+		let componentCount = ligatures.compactMap { $0.componentCount }.max() ?? 0
+		guard componentCount > 0 else {
+			throw OT2AATError.generationFailed("No ligatures or components")
+		}
+		/*
 		guard let firstLig = ligatures.first,
 			  let componentCount = firstLig.componentCount else {
 			throw OT2AATError.generationFailed("No ligatures or components")
-		}
+		} */
 		
 		// Determine which semantics are used
 		let usedSemantics = Set(ligatures.flatMap { $0.componentAnchors.keys })
