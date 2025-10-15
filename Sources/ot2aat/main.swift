@@ -9,9 +9,7 @@ struct OT2AAT: ParsableCommand {
             One2ManyCommand.self,
             ReorderCommand.self,
             ContextSubCommand.self,
-            Mark2BaseCommand.self,
-            Mark2MarkCommand.self,
-            Mark2LigaCommand.self
+            MarkPosCommand.self  // Unified mark positioning command
         ]
     )
 }
