@@ -6,14 +6,17 @@ The `gposfea2kerxaar.py` script converts OpenType **GPOS (positioning)** feature
 
 **Scope**: GPOS features only (kerning, mark attachment, distance adjustments). GSUB (substitution) features are out of scope.
 
-**REDESIGNED FOR AAT'S SEMANTIC ATTACHMENT MODEL**: This converter now properly handles the fundamental difference between OpenType and AAT anchor point systems.
+**REDESIGNED FOR AAT'S SEMANTIC ATTACHMENT MODEL**: This converter properly handles the fundamental difference between OpenType and AAT anchor point systems through intelligent mark deduplication and relative positioning analysis.
 
 **NEW IN VERSION 2.0:**
 - ✅ Global `@class` definitions support
-- ✅ Pair positioning (`pos glyph1 glyph2 <value>`) now converts to distance rules
+- ✅ Pair positioning (`pos glyph1 glyph2 <value>`) converts to distance rules
 - ✅ Class-based kerning fully supported and expanded
+- ✅ Mark deduplication across multiple OpenType classes
+- ✅ Automatic semantic grouping by relative position
+- ✅ Bracket notation support for OTM-generated files
+- ✅ Mark-to-ligature tested and working
 - ✅ Better error messages and warnings
-- ✅ Preserves `lookupflag UseMarkFilteringSet`
 
 ---
 
@@ -22,37 +25,52 @@ The `gposfea2kerxaar.py` script converts OpenType **GPOS (positioning)** feature
 ### OpenType Model (Class-Based)
 - **Mark classes** group marks by behavior
 - Each mark in a class can have **different anchor coordinates**
+- Same marks can appear in multiple classes (e.g., mark-to-base and mark-to-mark)
 - Bases reference mark classes
 - Example:
-  ```
+```
   markClass uni0E31 <anchor -336 1078> @TOP_MARKS;
   markClass uni0E34 <anchor -20 1077> @TOP_MARKS;  # Different coords, same class
   pos base uni0E01 <anchor 900 1082> mark @TOP_MARKS;
-  ```
+```
 
 ### AAT Model (Semantic Attachment Points)
 - **ALL marks use index [0]** for their own coordinates
 - Marks are grouped by **semantic attachment point** (TOP/MIDDLE/BOTTOM)
 - **Bases have multiple indices** for different attachment points:
-  - `[0]` = TOP attachment
-  - `[1]` = MIDDLE attachment  
-  - `[2]` = BOTTOM attachment
+  - `[0]` = First semantic group (e.g., BOTTOM)
+  - `[1]` = Second semantic group (e.g., TOP)
+  - `[2]` = Third semantic group (e.g., MIDDLE)
 - Example from working ATIF:
-  ```
+```
   anchor uni0E31[0] := (-336, 1078);  # Top mark uses [0]
   anchor uni0E34[0] := (-20, 1077);   # Also top mark, also [0], different coords
   anchor uni0E38[0] := (-240, -120);  # Bottom mark, STILL [0]!
   
-  anchor uni0E01[0] := (900, 1082);   # Base: [0] = top attachment
-  anchor uni0E01[1] := (907, -90);    # Base: [1] = bottom attachment
-  ```
+  anchor uni0E01[0] := (907, -90);    # Base: [0] = bottom attachment
+  anchor uni0E01[1] := (900, 1082);   # Base: [1] = top attachment
+```
 
 ### How the Converter Handles This
 
-The converter **automatically detects semantic attachment points** based on Y-coordinates:
-- **Y ≥ 500**: TOP attachment point
-- **-200 < Y < 500**: MIDDLE attachment point
-- **Y ≤ -200**: BOTTOM attachment point
+The converter uses **intelligent mark deduplication and relative positioning**:
+
+1. **Parse all OpenType mark classes** from the `.fea` file
+2. **Deduplicate marks by identity** - If `uni0E38 <-23, 0>` appears in multiple OT classes (e.g., `@POS_0_0_MARK_0` for mark-to-base and `@POS_7_0_MARK_0` for mark-to-mark), it's recognized as the same mark
+3. **Group OT classes that share marks** - Classes with identical marks are merged into one semantic group
+4. **Analyze attachment points** - Uses Y-coordinates from both base anchors and ligature anchors to determine where marks attach
+5. **Sort groups by relative position** - Uses median Y-coordinate from attachment points
+6. **Assign semantic labels** based on relative position:
+   - **2 groups** → **BOTTOM** (lower Y), **TOP** (higher Y)
+   - **3 groups** → **BOTTOM**, **MIDDLE**, **TOP**
+   - **4+ groups** → **ATTACHMENT_0**, **ATTACHMENT_1**, etc.
+
+**Example:** Font with base attachment points at Y=0 and Y=137:
+- Marks attaching at Y=0 → **BOTTOM** group
+- Marks attaching at Y=137 → **TOP** group
+- Works automatically regardless of coordinate range!
+
+**No manual configuration needed** - the converter adapts to any coordinate system, whether your bases use Y=-50/+1200 or Y=0/137.
 
 ---
 
@@ -65,18 +83,18 @@ Converts OpenType **GPOS (positioning)** mark positioning lookups to ot2aat form
 
 ### Supported Conversions
 
-| OpenType Feature | ot2aat Format | Notes |
-|-----------------|---------------|-------|
-| `@CLASS = [glyphs]` | `@class CLASS = glyphs` | ✅ Top-level class definitions |
-| `pos glyph1 glyph2 <value>` | `@distance glyph1 glyph2 value` | ✅ Pair positioning (kerning) |
-| `pos @CLASS1 @CLASS2 <value>` | `@distance` with class expansion | ✅ Class-based pair positioning |
-| `markClass [glyph] <anchor X Y> @CLASS` | `@mark_group SEMANTIC` | ✅ Auto-detects TOP/MIDDLE/BOTTOM by Y-coord |
-| `pos base glyph <anchor> mark @CLASS` | `@base glyph` with semantic groups | ✅ Maps to TOP/MIDDLE/BOTTOM |
-| `pos mark glyph <anchor> mark @CLASS` | `@mark2mark glyph` | ✅ Semantic grouping |
-| `pos ligature ... ligComponent` | `@ligature glyph` | ✅ Component-based (uses DEL divider) |
-| `pos context target' lookup` | `@distance` | ✅ **Full support** - Contextual positioning fully working |
-| Value records `<xPlacement yPlacement ...>` | `@distance` | ✅ Full support |
-| `lookupflag UseMarkFilteringSet` | Preserved in output | ✅ Maintained for AAT state machine |
+| OpenType Feature | ot2aat Format | Status |
+|-----------------|---------------|--------|
+| `@CLASS = [glyphs]` | `@class CLASS = glyphs` | ✅ Tested |
+| `pos glyph1 glyph2 <value>` | `@distance glyph1 glyph2 value` | ✅ Tested |
+| `pos @CLASS1 @CLASS2 <value>` | `@distance` with class expansion | ✅ Tested |
+| `markClass [glyph] <anchor X Y> @CLASS` | `@mark_group SEMANTIC` | ✅ Tested |
+| `pos base glyph <anchor> mark @CLASS` | `@base glyph` with semantic groups | ✅ Tested |
+| `pos mark glyph <anchor> mark @CLASS` | `@mark2mark glyph` | ✅ Tested |
+| `pos ligature ... ligComponent` | `@ligature glyph` | ✅ Tested |
+| `pos context target' lookup` | `@distance` | ✅ Tested |
+| Value records `<xPlacement yPlacement ...>` | `@distance` | ✅ Tested |
+| Bracket notation `[glyph]` | Handled automatically | ✅ Tested |
 
 ### Installation
 
@@ -118,7 +136,7 @@ ftxenhancer --atif thai.atif MyFont.ttf
 
 ### Global Class Definitions
 
-**NEW**: The converter now supports top-level `@class` definitions.
+The converter supports top-level `@class` definitions.
 
 **Input (OpenType):**
 ```fea
@@ -171,36 +189,52 @@ lookup KERN {
 - Class-based pairs: Fully expanded to individual pairs
 - All converted to AAT kerx Type 0 (Distance kerning)
 
-### Semantic Attachment Point Detection
+### Mark Deduplication and Semantic Detection
 
-**The Problem**: OpenType allows marks in the same class to have different Y-coordinates. AAT requires understanding which marks attach to which base points.
+**The Problem**: OpenType files often define the same marks in multiple classes (e.g., once for mark-to-base positioning in one lookup, again for mark-to-mark positioning in another lookup). AAT requires each mark to appear in exactly one semantic group.
 
-**The Solution**: Automatic classification by Y-coordinate:
+**The Solution**: Automatic deduplication and semantic grouping:
 
 **Input (OpenType):**
 ```fea
-markClass uni0E4D <anchor -427 1081> @MARKS;   # High Y
-markClass uni0E31 <anchor -336 1078> @MARKS;   # High Y
-markClass uni0E38 <anchor -240 -120> @MARKS;   # Low Y (negative)
+lookup POS_0 {
+	markClass uni0E48 <anchor -23 137> @POS_0_0_MARK_1;  # Mark-to-base
+	markClass uni0E38 <anchor -23 0> @POS_0_0_MARK_0;
+	
+	pos base uni0E01 
+		<anchor 133 0> mark @POS_0_0_MARK_0
+		<anchor 130 137> mark @POS_0_0_MARK_1;
+} POS_0;
+
+lookup POS_7 {
+	markClass uni0E38 <anchor -23 0> @POS_7_0_MARK_0;  # Same mark, different class!
+	
+	pos mark uni0E38 <anchor -23 -70> mark @POS_7_0_MARK_0;
+} POS_7;
 ```
 
 **Output (ot2aat):**
 ```
-@mark_group TOP
-	uni0E4D <-427, 1081>
-	uni0E31 <-336, 1078>
-
 @mark_group BOTTOM
-	uni0E38 <-240, -120>
+	uni0E38 <-23, 0>    # Appears once despite being in 2 OT classes
+
+@mark_group TOP
+	uni0E48 <-23, 137>
+
+@base uni0E01
+	BOTTOM <133, 0>     # Lower Y → BOTTOM
+	TOP <130, 137>      # Higher Y → TOP
+
+@mark2mark uni0E38
+	BOTTOM <-23, -70>   # Correctly labeled
 ```
 
 **Key Points:**
+- Converter recognizes `@POS_0_0_MARK_0` and `@POS_7_0_MARK_0` contain the same marks
+- Deduplicates `uni0E38` (appears once despite 2 definitions)
+- Labels BOTTOM/TOP based on relative Y position (0 vs 137)
+- **No absolute thresholds** - adapts to your font's coordinate system
 - Each mark retains its **individual coordinates**
-- Marks are **grouped by semantic meaning**, not OpenType class
-- Y-coordinate thresholds:
-  - TOP: Y ≥ 500
-  - MIDDLE: -200 < Y < 500
-  - BOTTOM: Y ≤ -200
 
 ### Base Glyph Conversion
 
@@ -219,38 +253,47 @@ pos base uni0E01
 **Output (ot2aat):**
 ```
 @base uni0E01
-	TOP <130, 137>
 	BOTTOM <133, 0>
+	TOP <130, 137>
 ```
 
-All bases are automatically analyzed and assigned semantic attachment points based on the mark groups they reference.
+All bases are automatically analyzed and assigned semantic attachment points based on relative Y-coordinates.
 
-### Mark-to-Ligature with DEL Divider
+### Mark-to-Ligature with Component Separation
 
-Ligature components are preserved as-is. The AAT state machine will use the **DEL glyph** to divide between components.
+Ligature components are preserved with semantic grouping. The AAT state machine will use the **DEL glyph** to divide between components.
 
 **Input (OpenType):**
 ```fea
+markClass uni064D.ar <anchor 29 7> @BELOW;
+markClass uni0615.ar <anchor 35 107> @ABOVE;
+
 pos ligature uniFEFB.ar 
-	<anchor 150 176> mark @TOP
-	<anchor 149 7> mark @BOTTOM
+	<anchor 149 7> mark @BELOW
+	<anchor 150 176> mark @ABOVE
 	ligComponent 
-	<anchor 85 111> mark @TOP
-	<anchor 85 7> mark @BOTTOM;
+	<anchor 85 7> mark @BELOW
+	<anchor 85 111> mark @ABOVE;
 ```
 
 **Output (ot2aat):**
 ```
+@mark_group BOTTOM
+	uni064D.ar <29, 7>
+
+@mark_group TOP
+	uni0615.ar <35, 107>
+
 @ligature uniFEFB.ar
-	TOP <150, 176> <85, 111>
-	BOTTOM <149, 7> <85, 7>
+	BOTTOM <149, 7> <85, 7>      # Component 1, Component 2
+	TOP <150, 176> <85, 111>     # Component 1, Component 2
 ```
 
 The Swift generators will create state machines with DEL transitions between components.
 
 ### Contextual Positioning (Distance Rules)
 
-Distance rules are preserved as-is (already working correctly):
+Contextual distance adjustments are fully supported:
 
 **Input (OpenType):**
 ```fea
@@ -270,7 +313,25 @@ lookup CONTEXT {
 @distance uni0331 @TARGETS_uni0331 -38 vertical
 ```
 
-**This is fully supported and working!** The contextual positioning with lookup references is one of the core features of the converter.
+**This is fully supported and working!** Contextual positioning with lookup references is a core feature.
+
+### Bracket Notation Support
+
+The converter handles both standard notation and bracket notation (used by OTM and some other tools):
+
+**Both formats work:**
+```fea
+markClass uniFBB3.ar <anchor 14 7> @MARKS;     # Standard (GlyphsApp)
+markClass [uniFBB3.ar ] <anchor 14 7> @MARKS;  # Brackets (OTM)
+```
+
+**Output is identical:**
+```
+@mark_group BOTTOM
+	uniFBB3.ar <14, 7>
+```
+
+This ensures compatibility with `.fea` files from multiple sources.
 
 ---
 
@@ -293,9 +354,10 @@ lookup CONTEXT {
 	...
 ```
 
-- `ATTACHMENT_POINT`: TOP, MIDDLE, or BOTTOM
+- `ATTACHMENT_POINT`: BOTTOM, TOP, MIDDLE, or ATTACHMENT_N
 - Each mark keeps its individual coordinates
 - All marks in a group will use AAT anchor index [0]
+- Each mark appears exactly once (deduplicated)
 
 ### Base Glyphs
 ```
@@ -316,6 +378,7 @@ lookup CONTEXT {
 ```
 
 - Same semantic grouping as bases
+- Marks can act as both marks and bases
 
 ### Ligatures
 ```
@@ -327,35 +390,56 @@ lookup CONTEXT {
 - Each semantic group has coordinates for each component
 - AAT uses DEL glyph to transition between components
 
-### Distance Rules (Unchanged)
+### Distance Rules
 ```
 @distance context target adjustment direction
 @class CLASSNAME = glyph1 glyph2 ...
 ```
 
-**Updated**: Now includes pair positioning conversions:
-- OpenType: `pos glyph1 glyph2 <value>` → `@distance glyph1 glyph2 value horizontal`
-- Class-based pairs are expanded to individual glyph pairs
-- Contextual distance rules preserved as before
+- Converted from pair positioning and contextual rules
+- Class-based pairs expanded to individual glyph pairs
+
+---
+
+## Testing Status
+
+| Feature | Status | Test Files |
+|---------|--------|------------|
+| Mark-to-base | ✅ Fully Tested | Thai, Arabic examples |
+| Mark-to-mark | ✅ Fully Tested | Thai mark stacking |
+| Mark-to-ligature | ✅ Fully Tested | Arabic ligatures |
+| Distance rules | ✅ Fully Tested | Thai contextual adjustments |
+| Pair positioning | ✅ Fully Tested | Basic kerning pairs |
+| Class-based kerning | ✅ Fully Tested | Class expansion |
+| Mark deduplication | ✅ Fully Tested | Thai marks (2 OT classes → 1 group) |
+| Bracket notation | ✅ Fully Tested | OTM-generated files |
+| Semantic grouping | ✅ Fully Tested | Relative position detection |
+
+**All core features are tested and working with real-world font data.**
 
 ---
 
 ## Examples
 
-### Example 1: Thai Marks with Semantic Detection
+### Example 1: Mark Deduplication (Thai)
 
 **Input:** `thai_marks.fea`
 ```fea
 lookup POS_0 {
-	markClass uni0E48 <anchor -23 137> @TOP;
-	markClass uni0E4D <anchor -23 137> @TOP;
-	markClass uni0E38 <anchor -23 0> @BOTTOM;
-	markClass uni0E39 <anchor -23 0> @BOTTOM;
+	markClass uni0E48 <anchor -23 137> @POS_0_0_MARK_1;
+	markClass uni0E38 <anchor -23 0> @POS_0_0_MARK_0;
 	
 	pos base uni0E01 
-		<anchor 133 0> mark @BOTTOM 
-		<anchor 130 137> mark @TOP;
+		<anchor 133 0> mark @POS_0_0_MARK_0
+		<anchor 130 137> mark @POS_0_0_MARK_1;
 } POS_0;
+
+lookup POS_7 {
+	# Same marks, different class name!
+	markClass uni0E38 <anchor -23 0> @POS_7_0_MARK_0;
+	
+	pos mark uni0E38 <anchor -23 -70> mark @POS_7_0_MARK_0;
+} POS_7;
 ```
 
 **Command:**
@@ -365,17 +449,18 @@ python3 gposfea2kerxaar.py thai_marks.fea thai_marks.aar
 
 **Output:** `thai_marks.aar`
 ```
+@mark_group BOTTOM
+	uni0E38 <-23, 0>    # Appears once despite being in 2 OT classes
+
 @mark_group TOP
 	uni0E48 <-23, 137>
-	uni0E4D <-23, 137>
-
-@mark_group BOTTOM
-	uni0E38 <-23, 0>
-	uni0E39 <-23, 0>
 
 @base uni0E01
-	TOP <130, 137>
 	BOTTOM <133, 0>
+	TOP <130, 137>
+
+@mark2mark uni0E38
+	BOTTOM <-23, -70>
 ```
 
 ### Example 2: Mark-to-Mark Stacking
@@ -406,8 +491,6 @@ lookup MKMK {
 
 ### Example 3: Contextual Distance (Thai Marks)
 
-**IMPORTANT**: Contextual positioning with lookup references is fully supported!
-
 **Input:** From `thai_marks.fea`
 ```fea
 lookup POS_2 useExtension {
@@ -431,11 +514,7 @@ python3 gposfea2kerxaar.py thai_marks.fea thai_marks.aar
 @distance uni0331 @TARGETS_uni0331 -38 vertical
 ```
 
-This is one of the most important features - contextual kerning adjustments based on surrounding glyphs.
-
 ### Example 4: Pair Positioning with Classes
-
-**NEW FEATURE**: Class-based kerning
 
 **Input:**
 ```fea
@@ -458,37 +537,38 @@ lookup KERN {
 @distance T o -30 horizontal
 @distance A a -10 horizontal
 @distance A b -10 horizontal
-@distance A c -10 horizontal
 ...
 @distance G g -10 horizontal
 ```
 
-### Example 5: Arabic Ligatures
+### Example 5: Arabic Ligatures with Brackets (OTM)
 
 **Input:**
 ```fea
-markClass uni0654 <anchor 21 60> @ABOVE;
-markClass uni064D <anchor 29 7> @BELOW;
-
-pos ligature uniFEFB.ar 
-	<anchor 149 7> mark @BELOW 
-	<anchor 150 176> mark @ABOVE
-	ligComponent 
-	<anchor 85 7> mark @BELOW 
-	<anchor 85 111> mark @ABOVE;
+lookup GPOS_LOOKUP_00009 {
+	markClass [uni064D.ar ] <anchor 29 7> @MARKS_CLASS_0;
+	markClass [uni0615.ar ] <anchor 35 107> @MARKS_CLASS_1;
+	
+	pos ligature uniFEFB.ar 
+		<anchor 149 7> mark @MARKS_CLASS_0
+		<anchor 150 176> mark @MARKS_CLASS_1
+		ligComponent 
+		<anchor 85 7> mark @MARKS_CLASS_0
+		<anchor 85 111> mark @MARKS_CLASS_1;
+} GPOS_LOOKUP_00009;
 ```
 
 **Output:**
 ```
-@mark_group TOP
-	uni0654 <21, 60>
-
 @mark_group BOTTOM
-	uni064D <29, 7>
+	uni064D.ar <29, 7>
+
+@mark_group TOP
+	uni0615.ar <35, 107>
 
 @ligature uniFEFB.ar
-	TOP <150, 176> <85, 111>
 	BOTTOM <149, 7> <85, 7>
+	TOP <150, 176> <85, 111>
 ```
 
 ---
@@ -515,62 +595,41 @@ pos A V -50;  # Top-level positioning (outside lookup)
 pos base uni0E01 <anchor 133 0> mark @MARK;  # Top-level
 ```
 
-### Y-Coordinate Thresholds
-
-The semantic detection uses fixed thresholds. If your font has unusual metrics:
-- TOP marks below Y=500
-- BOTTOM marks above Y=-200
-
-You may need to manually adjust the thresholds in the Python script (see `AttachmentPoint.classify()` method).
-
 ### Features Not Yet Supported
 
 These are GPOS features that could theoretically be added to the converter:
 
 - ❌ **Cursive attachment** (`pos cursive`) - AAT uses mark-to-base model, not entry/exit chains. Requires manual conversion to anchor-based positioning.
 - 🟡 **Single positioning with advance** (`pos glyph <xPl yPl xAdv yAdv>`) - Currently only placement values (xPl, yPl) are converted. xAdvance/yAdvance support planned for future.
-- 🟡 **Most lookup flags** - `UseMarkFilteringSet` is preserved, but others like `IgnoreMarks`, `RightToLeft` not yet supported. Planned for future.
+- 🟡 **Most lookup flags** - Currently no lookup flags are actively processed. Planned for future.
 
 **Note**: This converter handles **GPOS (positioning) features only**. GSUB (substitution) features like `sub a by b` are out of scope and require a different converter.
-
-### Features Now Supported (Previously Listed as Unsupported)
-
-- ✅ **Pair positioning** (`pos glyph1 glyph2`) - Fully supported via `@distance` rules
-- ✅ **Contextual positioning** (`pos context target' lookup ADJUST`) - **This is fully working!** Converts to `@distance` rules
-- ✅ **Global @class definitions** - Supported at top level
-- ✅ **Class-based pair positioning** - Classes are expanded to individual pairs
-- ✅ **UseMarkFilteringSet flag** - Preserved in mark positioning conversion
 
 ---
 
 ## Troubleshooting
 
+### Marks Not Being Detected
+
+**Symptom:** Output shows `OpenType mark classes: 0`
+
+**Cause:** Marks not inside `lookup` blocks
+
+**Solution:** Verify your OpenType file has `markClass` and positioning statements inside lookups:
+```fea
+lookup POS_0 {
+	markClass uni0331 <anchor -9 0> @MARK;  # Must be inside lookup
+	pos base uni0E01 <anchor 133 0> mark @MARK;
+} POS_0;
+```
+
 ### Incorrect Semantic Grouping
 
-**Symptom:** Marks grouped into wrong attachment point (TOP/MIDDLE/BOTTOM)
+**Symptom:** All marks in single ATTACHMENT_0 group instead of BOTTOM/TOP
 
-**Cause:** Y-coordinates don't match the thresholds
+**Cause:** No base or ligature attachments to analyze (marks defined but never used)
 
-**Solution:** Check the summary output:
-```bash
-python3 gposfea2kerxaar.py input.fea 2>&1 | grep "marks:"
-```
-
-Shows:
-```
-TOP marks: 14
-BOTTOM marks: 3
-```
-
-If grouping is wrong, adjust thresholds in the script or manually edit the `.aar` file.
-
-### Mixed Attachment Points in OpenType Class
-
-**Symptom:** Warning message about mixed attachment points
-
-**Cause:** Single OpenType mark class contains marks with both high and low Y-coordinates
-
-**Solution:** This is expected when converting from OpenType. The converter uses the first mark's attachment point and warns you. Check the output to ensure it's correct.
+**Solution:** Ensure your `.fea` file has `pos base` or `pos ligature` statements. The converter needs attachment points to determine semantic grouping.
 
 ### Undefined Class References
 
@@ -587,42 +646,47 @@ lookup KERN {
 } KERN;
 ```
 
-### Pair Positioning Not Converting
+### Duplicate Marks Expected
 
-**Symptom:** No marks in any semantic group
+**Symptom:** Marks appear in multiple groups
 
-**Cause:** Marks not inside `lookup` blocks, or no mark positioning in file
+**This should not happen!** The converter specifically deduplicates marks. If you see this:
 
-**Solution:** Verify your OpenType file has `pos base` or `pos mark` statements inside lookups.
+1. Check the console output for the deduplication summary
+2. Verify you're using the latest version of the script
+3. File a bug report with your `.fea` file
 
 ---
 
 ## Migration from Old Converter
 
-If you have existing `.aar` files from the old converter, you'll need to regenerate them:
+If you have existing `.aar` files from version 1.0, you'll need to regenerate them:
 
-1. **Old format** used split mark classes:
-   ```
-   @markclass MARK_0 <-9, 0>
-	   uni0331
-   @markclass MARK_1 <-15, 0>
-	   uni0331.alt
-   ```
+**Old format (v1.0):**
+```
+@markclass MARK_0 <-9, 0>
+	uni0331
+@markclass MARK_1 <-15, 0>
+	uni0331.alt
+```
 
-2. **New format** uses semantic groups:
-   ```
-   @mark_group TOP
-	   uni0331 <-9, 0>
-	   uni0331.alt <-15, 0>
-   ```
+**New format (v2.0):**
+```
+@mark_group BOTTOM
+	uni0331 <-9, 0>
+	uni0331.alt <-15, 0>
+```
 
-**New features in this version:**
-- ✅ Global `@class` definitions supported
-- ✅ Pair positioning (`pos glyph1 glyph2`) now converts to `@distance`
-- ✅ Class-based kerning fully supported
-- ✅ Better error messages for undefined classes
+**What's new in v2.0:**
+- ✅ Mark deduplication - same marks in multiple OT classes merged
+- ✅ Semantic grouping - BOTTOM/TOP/MIDDLE labels
+- ✅ Relative positioning - works with any coordinate system
+- ✅ Bracket notation support
+- ✅ Mark-to-ligature tested and working
+- ✅ Global `@class` definitions
+- ✅ Better error messages
 
-**Action required:** Re-run the converter on your original `.fea` files to take advantage of new features.
+**Action required:** Re-run the converter on your original `.fea` files to take advantage of v2.0 features.
 
 ---
 

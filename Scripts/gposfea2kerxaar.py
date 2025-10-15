@@ -139,7 +139,7 @@ class OTToOT2AAT:
     
     def parse_pair_positioning(self, line: str) -> bool:
         """Parse: pos glyph1 glyph2 <value>;"""
-        pattern = r'pos\s+(\S+)\s+(\S+)\s+<(-?\d+)>;'
+        pattern = r'pos\s+\[?\s*(\S+?)\s*\]?\s+\[?\s*(\S+?)\s*\]?\s+<(-?\d+)>;'
         match = re.match(pattern, line.strip())
         
         if match:
@@ -159,7 +159,8 @@ class OTToOT2AAT:
     
     def parse_markclass(self, line: str):
         """Parse: markClass glyph <anchor X Y> @CLASS;"""
-        pattern = r'markClass\s+(\S+)\s+<anchor\s+(-?\d+)\s+(-?\d+)>\s+@(\w+);'
+        # Handle optional brackets: [glyph] or glyph
+        pattern = r'markClass\s+\[?\s*(\S+?)\s*\]?\s+<anchor\s+(-?\d+)\s+(-?\d+)>\s+@(\w+);'
         match = re.match(pattern, line.strip())
         
         if match:
@@ -332,7 +333,7 @@ class OTToOT2AAT:
                     continue
             
             if "'" in current_line and 'lookup' in current_line:
-                pattern = r'pos\s+(\S+)\s+(?:\[([^\]]+)\]|(\S+))\'\s+lookup\s+(\w+);'
+                pattern = r'pos\s+\[?\s*(\S+?)\s*\]?\s+(?:\[([^\]]+)\]|(\S+))\'\s+lookup\s+(\w+);'
                 match = re.match(pattern, current_line)
                 
                 if match:
@@ -372,7 +373,7 @@ class OTToOT2AAT:
                 lines_consumed += 1
                 continue
             
-            pattern = r'pos\s+(\S+)\s+<(-?\d+)\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)>;'
+            pattern = r'pos\s+\[?\s*(\S+?)\s*\]?\s+<(-?\d+)\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)>;'
             match = re.match(pattern, current_line)
             
             if match:
@@ -423,23 +424,32 @@ class OTToOT2AAT:
             ot_class_groups.append(related_classes)
             processed_classes.update(related_classes)
         
-        # Step 3: For each group, determine representative base Y for sorting
+        # Step 3: For each group, determine representative Y for sorting
         group_base_ys = []
         for class_group in ot_class_groups:
-            # Collect base Y values for any class in this group
-            base_ys = []
+            # Collect Y values from bases AND ligatures
+            attachment_ys = []
+            
+            # From base attachments
             for ot_class in class_group:
                 for base_glyph, attachments in self.base_attachments.items():
                     for att_class, x, y in attachments:
                         if att_class in class_group:
-                            base_ys.append(y)
+                            attachment_ys.append(y)
             
-            # Use median base Y, or median mark Y if no bases
-            if base_ys:
-                base_ys_sorted = sorted(base_ys)
-                median_y = base_ys_sorted[len(base_ys_sorted) // 2]
+            # From ligature attachments (NEW!)
+            for ot_class in class_group:
+                for ligature, ot_class_anchors in self.ligature_attachments.items():
+                    if ot_class in ot_class_anchors:
+                        for x, y in ot_class_anchors[ot_class]:
+                            attachment_ys.append(y)
+            
+            # Use median attachment Y, or median mark Y if no attachments
+            if attachment_ys:
+                attachment_ys_sorted = sorted(attachment_ys)
+                median_y = attachment_ys_sorted[len(attachment_ys_sorted) // 2]
             else:
-                # No bases, use mark Y
+                # No bases or ligatures, use mark Y
                 mark_ys = []
                 for ot_class in class_group:
                     mark_ys.extend([y for _, _, y in self.ot_marks[ot_class]])
@@ -494,6 +504,20 @@ class OTToOT2AAT:
         for semantic_name, group in sorted(self.semantic_groups.items()):
             ot_classes = [oc for oc, sn in self.ot_class_to_semantic.items() if sn == semantic_name]
             print(f"  {semantic_name}: {len(group.marks)} unique marks from OT classes: {', '.join(sorted(ot_classes))}", file=sys.stderr)
+                    
+        # DEBUG: Show what we found
+        print(f"\nDEBUG - OT class groups detected: {len(ot_class_groups)}", file=sys.stderr)
+        for idx, (class_group, median_y) in enumerate(group_base_ys):
+            print(f"  Group {idx}: classes={sorted(class_group)}, median_y={median_y}", file=sys.stderr)
+        
+        # DEBUG: Show ligature attachments
+        print(f"\nDEBUG - Ligature attachments:", file=sys.stderr)
+        for lig, classes in self.ligature_attachments.items():
+            print(f"  {lig}:", file=sys.stderr)
+            for ot_class, anchors in classes.items():
+                print(f"    {ot_class}: {anchors}", file=sys.stderr)
+
+
             
     
     def build_structured_data(self):
