@@ -202,104 +202,145 @@ class OTToOT2AAT:
             i += 1
     
     def generate_output(self):
-        """Generate ot2aat format"""
-        output = []
-        
-        output.append("# " + "=" * 76)
-        output.append("# Converted from OpenType AFDKO format to ot2aat format")
-        output.append("# " + "=" * 76)
-        output.append("")
-        
-        # Mark classes
-        if self.mark_classes:
-            output.append("# " + "-" * 76)
-            output.append("# MARK CLASSES")
-            output.append("# " + "-" * 76)
+            """Generate ot2aat format"""
+            output = []
+            
+            output.append("# " + "=" * 76)
+            output.append("# Converted from OpenType AFDKO format to ot2aat format")
+            output.append("# " + "=" * 76)
             output.append("")
             
-            for class_name in sorted(self.mark_classes.keys()):
-                anchors_dict = self.mark_classes[class_name]
+            # Mark classes - split by unique anchors
+            if self.mark_classes:
+                output.append("# " + "-" * 76)
+                output.append("# MARK CLASSES")
+                output.append("# " + "-" * 76)
+                output.append("")
+                output.append("# Note: OpenType marks with different anchors in same class")
+                output.append("# have been split into separate classes for AAT compatibility")
+                output.append("")
                 
-                # For each unique anchor point in this class
-                for anchor in sorted(anchors_dict.keys()):
-                    glyphs = anchors_dict[anchor]
+                class_counter = {}  # Track split classes
+                
+                for class_name in sorted(self.mark_classes.keys()):
+                    anchors_dict = self.mark_classes[class_name]
                     
-                    # If multiple anchor points in same class, we need to split
-                    # For now, use the first anchor as the "main" one
-                    # In practice, marks in same class should have same anchor
-                    pass
-                
-                # Get the most common anchor (or just the first one)
-                # Ideally all marks in a class have the same anchor
-                first_anchor = sorted(anchors_dict.keys())[0]
-                all_glyphs = []
-                for anchor, glyphs in anchors_dict.items():
-                    all_glyphs.extend(glyphs)
-                
-                output.append(f"@markclass {class_name} {first_anchor}")
-                
-                # Wrap glyphs at reasonable line length
-                line = "    "
-                for glyph in sorted(all_glyphs):
-                    if len(line) + len(glyph) + 1 > 80:
-                        output.append(line.rstrip())
+                    # If multiple anchors in same class, split them
+                    if len(anchors_dict) > 1:
+                        for idx, (anchor, glyphs) in enumerate(sorted(anchors_dict.items())):
+                            split_class_name = f"{class_name}_{idx}"
+                            output.append(f"@markclass {split_class_name} {anchor}")
+                            
+                            # Wrap glyphs at reasonable line length
+                            line = "    "
+                            for glyph in sorted(glyphs):
+                                if len(line) + len(glyph) + 1 > 80:
+                                    output.append(line.rstrip())
+                                    line = "    "
+                                line += glyph + " "
+                            
+                            if line.strip():
+                                output.append(line.rstrip())
+                            
+                            output.append("")
+                            
+                            # Track the split for updating base references
+                            if class_name not in class_counter:
+                                class_counter[class_name] = []
+                            class_counter[class_name].append(split_class_name)
+                    else:
+                        # Single anchor - use original class name
+                        anchor, glyphs = list(anchors_dict.items())[0]
+                        output.append(f"@markclass {class_name} {anchor}")
+                        
                         line = "    "
-                    line += glyph + " "
+                        for glyph in sorted(glyphs):
+                            if len(line) + len(glyph) + 1 > 80:
+                                output.append(line.rstrip())
+                                line = "    "
+                            line += glyph + " "
+                        
+                        if line.strip():
+                            output.append(line.rstrip())
+                        
+                        output.append("")
+                        
+                        class_counter[class_name] = [class_name]
+            
+            # Mark-to-base - need to duplicate for split classes
+            if self.bases:
+                output.append("# " + "-" * 76)
+                output.append("# MARK-TO-BASE")
+                output.append("# " + "-" * 76)
+                output.append("")
                 
-                if line.strip():
-                    output.append(line.rstrip())
+                for glyph in sorted(self.bases.keys()):
+                    attachments = self.bases[glyph]
+                    output.append(f"@base {glyph}")
+                    
+                    for class_name in sorted(attachments.keys()):
+                        anchor = attachments[class_name]
+                        
+                        # If this class was split, use all split versions
+                        if class_name in class_counter:
+                            for split_name in class_counter[class_name]:
+                                output.append(f"    {split_name} {anchor}")
+                        else:
+                            output.append(f"    {class_name} {anchor}")
+                    
+                    output.append("")
+            
+            # Mark-to-mark
+            if self.base_marks:
+                output.append("# " + "-" * 76)
+                output.append("# MARK-TO-MARK")
+                output.append("# " + "-" * 76)
+                output.append("")
                 
-                output.append("")
-        
-        # Mark-to-base
-        if self.bases:
-            output.append("# " + "-" * 76)
-            output.append("# MARK-TO-BASE")
-            output.append("# " + "-" * 76)
-            output.append("")
+                for mark in sorted(self.base_marks.keys()):
+                    attachments = self.base_marks[mark]
+                    output.append(f"@mark2mark {mark}")
+                    
+                    for class_name in sorted(attachments.keys()):
+                        anchor = attachments[class_name]
+                        
+                        if class_name in class_counter:
+                            for split_name in class_counter[class_name]:
+                                output.append(f"    {split_name} {anchor}")
+                        else:
+                            output.append(f"    {class_name} {anchor}")
+                    
+                    output.append("")
             
-            for glyph in sorted(self.bases.keys()):
-                attachments = self.bases[glyph]
-                output.append(f"@base {glyph}")
-                for class_name in sorted(attachments.keys()):
-                    anchor = attachments[class_name]
-                    output.append(f"    {class_name} {anchor}")
+            # Ligatures
+            if self.ligatures:
+                output.append("# " + "-" * 76)
+                output.append("# MARK-TO-LIGATURE")
+                output.append("# " + "-" * 76)
                 output.append("")
-        
-        # Mark-to-mark
-        if self.base_marks:
-            output.append("# " + "-" * 76)
-            output.append("# MARK-TO-MARK")
-            output.append("# " + "-" * 76)
-            output.append("")
+                
+                for ligature in sorted(self.ligatures.keys()):
+                    mark_classes = self.ligatures[ligature]
+                    output.append(f"@ligature {ligature}")
+                    
+                    for class_name in sorted(mark_classes.keys()):
+                        anchors = mark_classes[class_name]
+                        
+                        if class_name in class_counter:
+                            for split_name in class_counter[class_name]:
+                                line = f"    {split_name}"
+                                for anchor in anchors:
+                                    line += f" {anchor}"
+                                output.append(line)
+                        else:
+                            line = f"    {class_name}"
+                            for anchor in anchors:
+                                line += f" {anchor}"
+                            output.append(line)
+                    
+                    output.append("")
             
-            for mark in sorted(self.base_marks.keys()):
-                attachments = self.base_marks[mark]
-                output.append(f"@mark2mark {mark}")
-                for class_name in sorted(attachments.keys()):
-                    anchor = attachments[class_name]
-                    output.append(f"    {class_name} {anchor}")
-                output.append("")
-        
-        # Ligatures
-        if self.ligatures:
-            output.append("# " + "-" * 76)
-            output.append("# MARK-TO-LIGATURE")
-            output.append("# " + "-" * 76)
-            output.append("")
-            
-            for ligature in sorted(self.ligatures.keys()):
-                mark_classes = self.ligatures[ligature]
-                output.append(f"@ligature {ligature}")
-                for class_name in sorted(mark_classes.keys()):
-                    anchors = mark_classes[class_name]
-                    line = f"    {class_name}"
-                    for anchor in anchors:
-                        line += f" {anchor}"
-                    output.append(line)
-                output.append("")
-        
-        return '\n'.join(output)
+            return '\n'.join(output)
 
 def main():
     if len(sys.argv) < 2:
