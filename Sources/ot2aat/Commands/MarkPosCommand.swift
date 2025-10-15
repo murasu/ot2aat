@@ -110,10 +110,10 @@ struct MarkPosCommand: ParsableCommand {
 		print("Summary:")
 		print("--------")
 		
-		if !rules.markClasses.isEmpty {
-			print("Mark classes: \(rules.markClasses.count)")
-			for markClass in rules.markClasses {
-				print("  - \(markClass.name): \(markClass.count) marks")
+		if !rules.markGroups.isEmpty {
+			print("Mark groups: \(rules.markGroups.count)")
+			for markGroup in rules.markGroups {
+				print("  - \(markGroup.semantic): \(markGroup.count) marks")
 			}
 		}
 		

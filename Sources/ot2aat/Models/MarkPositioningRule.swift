@@ -45,21 +45,26 @@ struct AnchorPoint: Equatable {
 	}
 }
 
-// MARK: - Mark Class
+// MARK: - Mark Group (NEW - replaces MarkClass)
 
-/// Mark class with shared anchor point
-/// Example: @markclass TOP_MARKS <0, 148> uni0E48 uni0E49
-struct MarkClass {
-	let name: String           // e.g., "TOP_MARKS"
-	let marks: [String]        // Glyph names
-	let anchor: AnchorPoint    // Shared anchor for all marks
+/// Semantic mark group where each mark has its own anchor
+/// Example from .aar:
+/// @mark_group BOTTOM
+///     uni0E38 <-23, 0>
+///     uni0E39 <-23, 0>
+struct MarkGroup {
+	let semantic: String                    // BOTTOM, TOP, MIDDLE, ATTACHMENT_0, etc.
+	let marks: [String: AnchorPoint]        // glyph -> its anchor
 	let lineNumber: Int
 	
-	init(name: String, marks: [String], anchor: AnchorPoint, lineNumber: Int) {
-		self.name = name
+	init(semantic: String, marks: [String: AnchorPoint], lineNumber: Int) {
+		self.semantic = semantic
 		self.marks = marks
-		self.anchor = anchor
 		self.lineNumber = lineNumber
+	}
+	
+	var glyphNames: [String] {
+		return Array(marks.keys).sorted()
 	}
 	
 	var count: Int {
@@ -69,14 +74,23 @@ struct MarkClass {
 	var isEmpty: Bool {
 		return marks.isEmpty
 	}
+	
+	/// Get anchor for a specific mark
+	func anchor(for mark: String) -> AnchorPoint? {
+		return marks[mark]
+	}
 }
 
 // MARK: - Base Glyph
 
-/// Base glyph with attachment points for mark classes
+/// Base glyph with attachment points for semantic groups
+/// Example from .aar:
+/// @base uni0E01
+///     BOTTOM <133, 0>
+///     TOP <130, 137>
 struct BaseGlyph {
 	let glyph: String                           // Base glyph name
-	let attachments: [String: AnchorPoint]      // markClassName -> anchor
+	let attachments: [String: AnchorPoint]      // semantic -> anchor (BOTTOM, TOP, etc.)
 	let lineNumber: Int
 	
 	init(glyph: String, attachments: [String: AnchorPoint], lineNumber: Int) {
@@ -84,14 +98,22 @@ struct BaseGlyph {
 		self.attachments = attachments
 		self.lineNumber = lineNumber
 	}
+	
+	/// Get ordered semantic groups (for anchor index assignment)
+	var orderedSemantics: [String] {
+		return attachments.keys.sorted()
+	}
 }
 
 // MARK: - Base Mark Glyph (Mark-to-Mark)
 
 /// Mark glyph that acts as base for other marks (mark stacking)
+/// Example from .aar:
+/// @mark2mark uni0E38
+///     BOTTOM <-23, -70>
 struct BaseMarkGlyph {
 	let mark: String                            // Mark glyph name
-	let attachments: [String: AnchorPoint]      // markClassName -> anchor
+	let attachments: [String: AnchorPoint]      // semantic -> anchor
 	let lineNumber: Int
 	
 	init(mark: String, attachments: [String: AnchorPoint], lineNumber: Int) {
@@ -99,14 +121,22 @@ struct BaseMarkGlyph {
 		self.attachments = attachments
 		self.lineNumber = lineNumber
 	}
+	
+	var orderedSemantics: [String] {
+		return attachments.keys.sorted()
+	}
 }
 
 // MARK: - Ligature Glyph
 
-/// Ligature with multiple component anchors
+/// Ligature with multiple component anchors per semantic group
+/// Example from .aar:
+/// @ligature uniFEFB.ar
+///     BOTTOM <149, 7> <85, 7>
+///     TOP <150, 176> <85, 111>
 struct LigatureGlyph {
 	let ligature: String                        // Ligature glyph name
-	let componentAnchors: [String: [AnchorPoint]]  // markClassName -> [component anchors]
+	let componentAnchors: [String: [AnchorPoint]]  // semantic -> [component anchors]
 	let lineNumber: Int
 	
 	init(ligature: String, componentAnchors: [String: [AnchorPoint]], lineNumber: Int) {
@@ -115,24 +145,29 @@ struct LigatureGlyph {
 		self.lineNumber = lineNumber
 	}
 	
-	/// Number of components (should be same for all mark classes)
+	/// Number of components (should be same for all semantics)
 	var componentCount: Int? {
 		guard let first = componentAnchors.values.first else { return nil }
 		return first.count
 	}
 	
-	/// Validate that all mark classes have same component count
+	/// Get ordered semantic groups
+	var orderedSemantics: [String] {
+		return componentAnchors.keys.sorted()
+	}
+	
+	/// Validate that all semantics have same component count
 	func validate() throws {
 		guard let expectedCount = componentCount else {
 			throw OT2AATError.invalidRule("Line \(lineNumber): Ligature '\(ligature)' has no components")
 		}
 		
-		for (markClass, anchors) in componentAnchors {
+		for (semantic, anchors) in componentAnchors {
 			if anchors.count != expectedCount {
 				throw OT2AATError.invalidRule(
 					"""
 					Line \(lineNumber): Component count mismatch in ligature '\(ligature)'
-					Mark class '\(markClass)' has \(anchors.count) components
+					Semantic '\(semantic)' has \(anchors.count) components
 					Expected \(expectedCount) components
 					"""
 				)
@@ -144,7 +179,7 @@ struct LigatureGlyph {
 // MARK: - Distance Rule (Simple Pairs)
 
 /// Distance adjustment (contextual kerning)
-/// Example: @distance uni0331 uni0E38 -50
+/// Example: @distance uni0331 uni0E38 -50 vertical
 struct DistanceRule {
 	let context: RuleElement        // Glyph or class that triggers adjustment
 	let target: RuleElement         // Glyph or class to adjust
@@ -187,11 +222,6 @@ struct DistanceRule {
 // MARK: - Distance Matrix (Class-Based)
 
 /// Class-based distance matrix
-/// Example:
-/// @matrix
-///     left @LEFT1 @LEFT2
-///     right @RIGHT1 @RIGHT2
-///     @RIGHT1 @LEFT1 => -28
 struct DistanceMatrix {
 	let leftClasses: [String]       // Class names (without @)
 	let rightClasses: [String]      // Class names (without @)
@@ -259,7 +289,7 @@ struct DistanceMatrix {
 
 /// Complete mark positioning rules (all four types)
 struct MarkPositioningRules {
-	let markClasses: [MarkClass]
+	let markGroups: [MarkGroup]  // Changed from markClasses
 	let bases: [BaseGlyph]
 	let baseMarks: [BaseMarkGlyph]
 	let ligatures: [LigatureGlyph]
@@ -267,14 +297,14 @@ struct MarkPositioningRules {
 	let distanceMatrices: [DistanceMatrix]
 	let glyphClasses: [GlyphClass] 
 	
-	init(markClasses: [MarkClass] = [],
+	init(markGroups: [MarkGroup] = [],
 		 bases: [BaseGlyph] = [],
 		 baseMarks: [BaseMarkGlyph] = [],
 		 ligatures: [LigatureGlyph] = [],
 		 distanceRules: [DistanceRule] = [],
 		 distanceMatrices: [DistanceMatrix] = [],
 		 glyphClasses: [GlyphClass] = []) {
-		self.markClasses = markClasses
+		self.markGroups = markGroups
 		self.bases = bases
 		self.baseMarks = baseMarks
 		self.ligatures = ligatures
@@ -285,55 +315,55 @@ struct MarkPositioningRules {
 	
 	/// Validate all rules
 	func validate(using registry: GlyphClassRegistry) throws {
-		// Validate mark classes are non-empty
-		for markClass in markClasses {
-			if markClass.isEmpty {
+		// Validate mark groups are non-empty
+		for markGroup in markGroups {
+			if markGroup.isEmpty {
 				throw OT2AATError.invalidRule(
-					"Line \(markClass.lineNumber): Mark class '@\(markClass.name)' is empty"
+					"Line \(markGroup.lineNumber): Mark group '\(markGroup.semantic)' is empty"
 				)
 			}
 		}
 		
-		// Validate base attachments reference valid mark classes
-		let markClassNames = Set(markClasses.map { $0.name })
+		// Validate base attachments reference valid semantic groups
+		let semanticNames = Set(markGroups.map { $0.semantic })
 		
 		for base in bases {
-			for (markClassName, _) in base.attachments {
-				guard markClassNames.contains(markClassName) else {
+			for (semantic, _) in base.attachments {
+				guard semanticNames.contains(semantic) else {
 					throw OT2AATError.invalidRule(
 						"""
-						Line \(base.lineNumber): Base '\(base.glyph)' references undefined mark class '\(markClassName)'
-						Define mark class with: @markclass \(markClassName) <x, y> ...
+						Line \(base.lineNumber): Base '\(base.glyph)' references undefined semantic group '\(semantic)'
+						Define mark group with: @mark_group \(semantic) ...
 						"""
 					)
 				}
 			}
 		}
 		
-		// Validate base marks reference valid mark classes
+		// Validate base marks reference valid semantic groups
 		for baseMark in baseMarks {
-			for (markClassName, _) in baseMark.attachments {
-				guard markClassNames.contains(markClassName) else {
+			for (semantic, _) in baseMark.attachments {
+				guard semanticNames.contains(semantic) else {
 					throw OT2AATError.invalidRule(
 						"""
-						Line \(baseMark.lineNumber): Mark '\(baseMark.mark)' references undefined mark class '\(markClassName)'
-						Define mark class with: @markclass \(markClassName) <x, y> ...
+						Line \(baseMark.lineNumber): Mark '\(baseMark.mark)' references undefined semantic group '\(semantic)'
+						Define mark group with: @mark_group \(semantic) ...
 						"""
 					)
 				}
 			}
 		}
 		
-		// Validate ligatures reference valid mark classes and have valid components
+		// Validate ligatures reference valid semantic groups and have valid components
 		for ligature in ligatures {
 			try ligature.validate()
 			
-			for (markClassName, _) in ligature.componentAnchors {
-				guard markClassNames.contains(markClassName) else {
+			for (semantic, _) in ligature.componentAnchors {
+				guard semanticNames.contains(semantic) else {
 					throw OT2AATError.invalidRule(
 						"""
-						Line \(ligature.lineNumber): Ligature '\(ligature.ligature)' references undefined mark class '\(markClassName)'
-						Define mark class with: @markclass \(markClassName) <x, y> ...
+						Line \(ligature.lineNumber): Ligature '\(ligature.ligature)' references undefined semantic group '\(semantic)'
+						Define mark group with: @mark_group \(semantic) ...
 						"""
 					)
 				}
@@ -356,14 +386,34 @@ struct MarkPositioningRules {
 		return !distanceRules.isEmpty || !distanceMatrices.isEmpty
 	}
 	
-	/// Get mark class by name
-	func markClass(named name: String) -> MarkClass? {
-		return markClasses.first { $0.name == name }
+	/// Get mark group by semantic name
+	func markGroup(named semantic: String) -> MarkGroup? {
+		return markGroups.first { $0.semantic == semantic }
 	}
 	
-	/// Get index of mark class (for anchor point indexing)
-	func markClassIndex(named name: String) -> Int? {
-		return markClasses.firstIndex { $0.name == name }
+	/// Get semantic group index for anchor assignment
+	/// Ordered: BOTTOM < MIDDLE < TOP, or ATTACHMENT_0 < ATTACHMENT_1 < ...
+	func semanticIndex(_ semantic: String) -> Int? {
+		let ordered = orderedSemantics()
+		return ordered.firstIndex(of: semantic)
+	}
+	
+	/// Get ordered semantic groups (for consistent anchor indexing)
+	func orderedSemantics() -> [String] {
+		return markGroups.map { $0.semantic }.sorted { lhs, rhs in
+			// Custom sort: BOTTOM < MIDDLE < TOP < ATTACHMENT_*
+			let order = ["BOTTOM", "MIDDLE", "TOP"]
+			if let lhsIdx = order.firstIndex(of: lhs), let rhsIdx = order.firstIndex(of: rhs) {
+				return lhsIdx < rhsIdx
+			}
+			if order.contains(lhs) && !order.contains(rhs) {
+				return true
+			}
+			if !order.contains(lhs) && order.contains(rhs) {
+				return false
+			}
+			return lhs < rhs  // Lexicographic for ATTACHMENT_*
+		}
 	}
 }
 

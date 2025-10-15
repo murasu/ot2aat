@@ -24,7 +24,6 @@ struct ATIFGeneratorKerx {
 		
 		// Table 0: Distance positioning (Type 0 - simple pairs)
 		if !rules.distanceRules.isEmpty {
-			//if tableNumber > 0 { output += "\n" }
 			output += try generateDistancePairs(
 				rules: rules.distanceRules,
 				glyphClasses: rules.glyphClasses,
@@ -43,12 +42,13 @@ struct ATIFGeneratorKerx {
 			tableNumber += 1
 		}
 		
-		// Table 2+: Mark-to-base (one per mark class set)
+		// Table 2+: Mark-to-base (one per mark group set)
 		if !rules.bases.isEmpty {
 			if tableNumber > 0 { output += "\n" }
 			output += try generateMark2Base(
-				markClasses: rules.markClasses,
+				markGroups: rules.markGroups,
 				bases: rules.bases,
+				orderedSemantics: rules.orderedSemantics(),
 				tableNumber: tableNumber
 			)
 			tableNumber += 1
@@ -58,21 +58,21 @@ struct ATIFGeneratorKerx {
 		if !rules.baseMarks.isEmpty {
 			if tableNumber > 0 { output += "\n" }
 			output += try generateMark2Mark(
-				markClasses: rules.markClasses,
+				markGroups: rules.markGroups,
 				baseMarks: rules.baseMarks,
+				orderedSemantics: rules.orderedSemantics(),
 				tableNumber: tableNumber
 			)
 			tableNumber += 1
 		}
 		
-		// Table 4+: Mark-to-ligature (grouped by mark classes)
-		let ligatureGroups = groupLigaturesByMarkClasses(rules.ligatures)
-		for group in ligatureGroups {
+		// Table 4+: Mark-to-ligature (grouped by semantics)
+		if !rules.ligatures.isEmpty {
 			if tableNumber > 0 { output += "\n" }
 			output += try generateMark2Ligature(
-				markClasses: rules.markClasses,
-				ligatures: group.ligatures,
-				markClassNames: group.markClassNames,
+				markGroups: rules.markGroups,
+				ligatures: rules.ligatures,
+				orderedSemantics: rules.orderedSemantics(),
 				tableNumber: tableNumber
 			)
 			tableNumber += 1
@@ -81,9 +81,8 @@ struct ATIFGeneratorKerx {
 		return output
 	}
 	
-	// MARK: - Distance Positioning (Type 0)
+	// MARK: - Distance Positioning (Type 0) - UNCHANGED
 	
-	/// Generate Type 0 distance kerning (simple pairs)
 	private static func generateDistancePairs(
 		rules: [DistanceRule],
 		glyphClasses: [GlyphClass],
@@ -95,28 +94,23 @@ struct ATIFGeneratorKerx {
 		output += "// Table \(tableNumber): Distance kerning (simple pairs)\n"
 		output += "// " + String(repeating: "-", count: 79) + "\n\n"
 		
-		// Create registry from stored classes
 		var registry = GlyphClassRegistry()
 		for glyphClass in glyphClasses {
 			try registry.register(glyphClass)
 		}
 		
-		// Expand all rules to glyph pairs
 		var allPairs: [(String, String, Int)] = []
-		
 		for rule in rules {
 			let pairs = try rule.expand(using: registry)
 			allPairs.append(contentsOf: pairs)
 		}
 		
-		// Determine orientation
 		let isVertical = rules.first?.direction == .vertical
 		
 		output += "kerning list {\n"
 		output += "    layout is \(isVertical ? "vertical" : "horizontal");\n"
 		output += "    kerning is \(isVertical ? "vertical" : "horizontal");\n\n"
 		
-		// List of pairs
 		for (context, target, value) in allPairs {
 			output += "    \(context) + \(target) => \(value);\n"
 		}
@@ -126,9 +120,8 @@ struct ATIFGeneratorKerx {
 		return output
 	}
 	
-	// MARK: - Distance Positioning (Type 2)
+	// MARK: - Distance Positioning (Type 2) - UNCHANGED
 	
-	/// Generate Type 2 class-based distance matrix
 	private static func generateDistanceMatrix(
 		matrix: DistanceMatrix,
 		tableNumber: Int
@@ -143,7 +136,6 @@ struct ATIFGeneratorKerx {
 		output += "    layout is horizontal;\n"
 		output += "    kerning is horizontal;\n\n"
 		
-		// Class definitions (need to get actual glyphs - for now placeholder)
 		for leftClass in matrix.leftClasses {
 			output += "    class \(leftClass) { /* glyphs */ };\n"
 		}
@@ -154,11 +146,9 @@ struct ATIFGeneratorKerx {
 		}
 		output += "\n"
 		
-		// Declare which classes are used
 		output += "    left classes { " + matrix.leftClasses.joined(separator: ", ") + " };\n"
 		output += "    right classes { " + matrix.rightClasses.joined(separator: ", ") + " };\n\n"
 		
-		// Adjustments
 		for (rightClass, leftClass, value) in matrix.adjustments {
 			output += "    \(rightClass) + \(leftClass) => \(value);\n"
 		}
@@ -168,12 +158,12 @@ struct ATIFGeneratorKerx {
 		return output
 	}
 	
-	// MARK: - Mark-to-Base (Type 4)
+	// MARK: - Mark-to-Base (Type 4) - REDESIGNED
 	
-	/// Generate Type 4 attachment for mark-to-base
 	private static func generateMark2Base(
-		markClasses: [MarkClass],
+		markGroups: [MarkGroup],
 		bases: [BaseGlyph],
+		orderedSemantics: [String],
 		tableNumber: Int
 	) throws -> String {
 		var output = ""
@@ -188,21 +178,22 @@ struct ATIFGeneratorKerx {
 		output += "    uses anchor points;\n"
 		output += "    scan glyphs backward;\n\n"
 		
-		// Mark anchors
-		output += "    // Mark anchors\n"
-		for (index, markClass) in markClasses.enumerated() {
-			for mark in markClass.marks {
-				output += "    anchor \(mark)[\(index)] := \(markClass.anchor.formatted);\n"
+		// Anchor definitions
+		output += "    // Mark anchors (all use index [0])\n"
+		for markGroup in markGroups {
+			for (glyph, anchor) in markGroup.marks.sorted(by: { $0.key < $1.key }) {
+				output += "    anchor \(glyph)[0] := \(anchor.formatted);\n"
 			}
 		}
 		
-		output += "\n    // Base anchors\n"
+		output += "\n    // Base anchors (sequential indices per semantic)\n"
 		for base in bases {
-			for (markClassName, anchor) in base.attachments.sorted(by: { $0.key < $1.key }) {
-				guard let index = markClasses.firstIndex(where: { $0.name == markClassName }) else {
-					throw OT2AATError.generationFailed("Mark class '\(markClassName)' not found")
+			for semantic in orderedSemantics {
+				guard let anchor = base.attachments[semantic],
+					  let semanticIndex = orderedSemantics.firstIndex(of: semantic) else {
+					continue
 				}
-				output += "    anchor \(base.glyph)[\(index)] := \(anchor.formatted);\n"
+				output += "    anchor \(base.glyph)[\(semanticIndex)] := \(anchor.formatted);\n"
 			}
 		}
 		output += "\n"
@@ -211,22 +202,20 @@ struct ATIFGeneratorKerx {
 		let baseGlyphs = bases.map { $0.glyph }.sorted()
 		output += "    class bases { " + baseGlyphs.joined(separator: ", ") + " };\n\n"
 		
-		for (index, markClass) in markClasses.enumerated() {
-			let className = index == 0 ? "marksTop" : (index == 1 ? "marksBot" : "marks\(index)")
-			output += "    class \(className) { " + markClass.marks.joined(separator: ", ") + " };\n"
+		for markGroup in markGroups {
+			let className = "marks_\(markGroup.semantic)"
+			output += "    class \(className) { " + markGroup.glyphNames.joined(separator: ", ") + " };\n"
 		}
 		output += "\n"
 		
-		// State definitions
+		// State machine
 		output += "    state Start {\n"
 		output += "        bases: sawBase;\n"
 		output += "    };\n\n"
 		
 		output += "    state withBase {\n"
-		for (index, _) in markClasses.enumerated() {
-			let className = index == 0 ? "marksTop" : (index == 1 ? "marksBot" : "marks\(index)")
-			let transitionName = index == 0 ? "sawMarkTop" : (index == 1 ? "sawMarkBot" : "sawMark\(index)")
-			output += "        \(className): \(transitionName);\n"
+		for markGroup in markGroups {
+			output += "        marks_\(markGroup.semantic): sawMark_\(markGroup.semantic);\n"
 		}
 		output += "        bases: sawBase;\n"
 		output += "    };\n\n"
@@ -237,31 +226,29 @@ struct ATIFGeneratorKerx {
 		output += "        mark glyph;\n"
 		output += "    };\n\n"
 		
-		for (index, _) in markClasses.enumerated() {
-			let transitionName = index == 0 ? "sawMarkTop" : (index == 1 ? "sawMarkBot" : "sawMark\(index)")
-			let actionName = index == 0 ? "snapMarkTop" : (index == 1 ? "snapMarkBot" : "snapMark\(index)")
-			
-			output += "    transition \(transitionName) {\n"
+		for (index, markGroup) in markGroups.enumerated() {
+			output += "    transition sawMark_\(markGroup.semantic) {\n"
 			output += "        change state to withBase;\n"
-			output += "        kerning action: \(actionName);\n"
+			output += "        kerning action: snapMark_\(markGroup.semantic);\n"
 			output += "    };\n"
-			
-			if index < markClasses.count - 1 {
+			if index < markGroups.count - 1 {
 				output += "\n"
 			}
 		}
 		output += "\n"
 		
 		// Anchor actions
-		for (index, _) in markClasses.enumerated() {
-			let actionName = index == 0 ? "snapMarkTop" : (index == 1 ? "snapMarkBot" : "snapMark\(index)")
+		for (index, markGroup) in markGroups.enumerated() {
+			guard let semanticIndex = orderedSemantics.firstIndex(of: markGroup.semantic) else {
+				continue
+			}
 			
-			output += "    anchor point action \(actionName) {\n"
-			output += "        marked glyph point: \(index);\n"
-			output += "        current glyph point: \(index);\n"
+			output += "    anchor point action snapMark_\(markGroup.semantic) {\n"
+			output += "        marked glyph point: \(semanticIndex);\n"
+			output += "        current glyph point: 0;\n"
 			output += "    };\n"
 			
-			if index < markClasses.count - 1 {
+			if index < markGroups.count - 1 {
 				output += "\n"
 			}
 		}
@@ -271,12 +258,12 @@ struct ATIFGeneratorKerx {
 		return output
 	}
 	
-	// MARK: - Mark-to-Mark (Type 4)
+	// MARK: - Mark-to-Mark (Type 4) - REDESIGNED
 	
-	/// Generate Type 4 attachment for mark-to-mark
 	private static func generateMark2Mark(
-		markClasses: [MarkClass],
+		markGroups: [MarkGroup],
 		baseMarks: [BaseMarkGlyph],
+		orderedSemantics: [String],
 		tableNumber: Int
 	) throws -> String {
 		var output = ""
@@ -291,31 +278,29 @@ struct ATIFGeneratorKerx {
 		output += "    uses anchor points;\n"
 		output += "    scan glyphs backward;\n\n"
 		
-		// Determine which mark classes are used
-		var usedMarkClasses = Set<String>()
+		// Determine which semantics are used
+		var usedSemantics = Set<String>()
 		for baseMark in baseMarks {
-			for markClassName in baseMark.attachments.keys {
-				usedMarkClasses.insert(markClassName)
+			for semantic in baseMark.attachments.keys {
+				usedSemantics.insert(semantic)
 			}
 		}
 		
-		// Mark anchors (attaching marks)
-		output += "    // Attaching mark anchors\n"
-		let baseMarkIndex = markClasses.count  // Base mark anchors start after all mark class indices
-		
-		for (index, markClass) in markClasses.enumerated() {
-			if usedMarkClasses.contains(markClass.name) {
-				for mark in markClass.marks {
-					output += "    anchor \(mark)[\(index)] := \(markClass.anchor.formatted);\n"
-				}
+		// Anchor definitions
+		output += "    // Attaching mark anchors (use index [0])\n"
+		for markGroup in markGroups where usedSemantics.contains(markGroup.semantic) {
+			for (glyph, anchor) in markGroup.marks.sorted(by: { $0.key < $1.key }) {
+				output += "    anchor \(glyph)[0] := \(anchor.formatted);\n"
 			}
 		}
 		
-		output += "\n    // Base mark anchors\n"
-		for baseMark in baseMarks {
-			for (_, anchor) in baseMark.attachments.sorted(by: { $0.key < $1.key }) {
-				output += "    anchor \(baseMark.mark)[\(baseMarkIndex)] := \(anchor.formatted);\n"
-				break  // Only one attachment point per base mark (they can have multiple mark classes but same index)
+		// Base mark anchors use index after all mark groups
+		let baseMarkIndex = markGroups.count
+		output += "\n    // Base mark anchors (index [\(baseMarkIndex)])\n"
+		for baseMark in baseMarks.sorted(by: { $0.mark < $1.mark }) {
+			// Use first semantic's anchor (they should all have same attachment point)
+			if let firstAnchor = baseMark.attachments.values.first {
+				output += "    anchor \(baseMark.mark)[\(baseMarkIndex)] := \(firstAnchor.formatted);\n"
 			}
 		}
 		output += "\n"
@@ -324,26 +309,19 @@ struct ATIFGeneratorKerx {
 		let baseMarkGlyphs = baseMarks.map { $0.mark }.sorted()
 		output += "    class bases { " + baseMarkGlyphs.joined(separator: ", ") + " };\n\n"
 		
-		var classIndex = 0
-		for markClass in markClasses {
-			if usedMarkClasses.contains(markClass.name) {
-				let className = classIndex == 0 ? "marks" : "marks\(classIndex)"
-				output += "    class \(className) { " + markClass.marks.joined(separator: ", ") + " };\n"
-				classIndex += 1
-			}
+		for markGroup in markGroups where usedSemantics.contains(markGroup.semantic) {
+			output += "    class marks_\(markGroup.semantic) { " + markGroup.glyphNames.joined(separator: ", ") + " };\n"
 		}
 		output += "\n"
 		
-		// State definitions
+		// State machine
 		output += "    state Start {\n"
 		output += "        bases: sawBase;\n"
 		output += "    };\n\n"
 		
 		output += "    state withBase {\n"
-		let markCount = usedMarkClasses.count
-		for i in 0..<markCount {
-			let className = i == 0 ? "marks" : "marks\(i)"
-			output += "        \(className): sawMark;\n"
+		for markGroup in markGroups where usedSemantics.contains(markGroup.semantic) {
+			output += "        marks_\(markGroup.semantic): sawMark;\n"
 		}
 		output += "        bases: sawBase;\n"
 		output += "    };\n\n"
@@ -359,29 +337,23 @@ struct ATIFGeneratorKerx {
 		output += "        kerning action: snapMark;\n"
 		output += "    };\n\n"
 		
-		// Anchor action
+		// Anchor action (single action for all mark types)
 		output += "    anchor point action snapMark {\n"
 		output += "        marked glyph point: \(baseMarkIndex);\n"
-		
-		// Use first mark class index (they all stack the same way)
-		if let firstUsedMarkClass = markClasses.first(where: { usedMarkClasses.contains($0.name) }),
-		   let firstIndex = markClasses.firstIndex(where: { $0.name == firstUsedMarkClass.name }) {
-			output += "        current glyph point: \(firstIndex);\n"
-		}
-		
+		output += "        current glyph point: 0;\n"
 		output += "    };\n"
+		
 		output += "};\n"
 		
 		return output
 	}
 	
-	// MARK: - Mark-to-Ligature (Type 4)
+	// MARK: - Mark-to-Ligature (Type 4) - REDESIGNED
 	
-	/// Generate Type 4 attachment for mark-to-ligature
 	private static func generateMark2Ligature(
-		markClasses: [MarkClass],
+		markGroups: [MarkGroup],
 		ligatures: [LigatureGlyph],
-		markClassNames: [String],
+		orderedSemantics: [String],
 		tableNumber: Int
 	) throws -> String {
 		var output = ""
@@ -396,40 +368,35 @@ struct ATIFGeneratorKerx {
 		output += "    uses anchor points;\n"
 		output += "    scan glyphs backward;\n\n"
 		
-		// Determine max component count
+		// Determine component count
 		guard let firstLig = ligatures.first,
 			  let componentCount = firstLig.componentCount else {
 			throw OT2AATError.generationFailed("No ligatures or components")
 		}
 		
-		// Mark anchors
-		output += "    // Mark anchors\n"
-		var markClassIndices: [String: Int] = [:]
+		// Determine which semantics are used
+		let usedSemantics = Set(ligatures.flatMap { $0.componentAnchors.keys })
+		let usedOrderedSemantics = orderedSemantics.filter { usedSemantics.contains($0) }
 		
-		for markClass in markClasses {
-			if markClassNames.contains(markClass.name) {
-				let index = markClasses.firstIndex(where: { $0.name == markClass.name })!
-				markClassIndices[markClass.name] = index
-				
-				for mark in markClass.marks {
-					output += "    anchor \(mark)[\(index)] := \(markClass.anchor.formatted);\n"
-				}
+		// Anchor definitions
+		output += "    // Mark anchors (all use index [0])\n"
+		for markGroup in markGroups where usedSemantics.contains(markGroup.semantic) {
+			for (glyph, anchor) in markGroup.marks.sorted(by: { $0.key < $1.key }) {
+				output += "    anchor \(glyph)[0] := \(anchor.formatted);\n"
 			}
 		}
 		
 		output += "\n    // Ligature component anchors\n"
-		for ligature in ligatures {
-			for markClassName in markClassNames.sorted() {
-				guard let anchors = ligature.componentAnchors[markClassName],
-					  let baseIndex = markClassIndices[markClassName] else {
+		for ligature in ligatures.sorted(by: { $0.ligature < $1.ligature }) {
+			for semantic in usedOrderedSemantics {
+				guard let anchors = ligature.componentAnchors[semantic],
+					  let semanticIndex = orderedSemantics.firstIndex(of: semantic) else {
 					continue
 				}
 				
 				for (compIndex, anchor) in anchors.enumerated() {
-					// Calculate anchor index for this component
-					// Component 1 uses base indices (0, 1, ...)
-					// Component 2 uses next set (2, 3, ...)
-					let anchorIndex = baseIndex + (compIndex * markClassNames.count)
+					// Anchor index = semanticIndex + (component * semanticCount)
+					let anchorIndex = semanticIndex + (compIndex * usedOrderedSemantics.count)
 					output += "    anchor \(ligature.ligature)[\(anchorIndex)] := \(anchor.formatted);\n"
 				}
 			}
@@ -440,10 +407,8 @@ struct ATIFGeneratorKerx {
 		let ligGlyphs = ligatures.map { $0.ligature }.sorted()
 		output += "    class ligs { " + ligGlyphs.joined(separator: ", ") + " };\n\n"
 		
-		for markClassName in markClassNames {
-			if let markClass = markClasses.first(where: { $0.name == markClassName }) {
-				output += "    class marks_\(markClassName) { " + markClass.marks.joined(separator: ", ") + " };\n"
-			}
+		for markGroup in markGroups where usedSemantics.contains(markGroup.semantic) {
+			output += "    class marks_\(markGroup.semantic) { " + markGroup.glyphNames.joined(separator: ", ") + " };\n"
 		}
 		output += "\n"
 		
@@ -453,22 +418,18 @@ struct ATIFGeneratorKerx {
 		output += "        ligs: sawLig;\n"
 		output += "    };\n\n"
 		
-		// Generate states for each component
 		for comp in 0..<componentCount {
 			let stateName = comp == 0 ? "SLig" : "SLig\(comp)"
-			
 			output += "    state \(stateName) {\n"
 			
 			if comp < componentCount - 1 {
-				output += "        DEL: sawLigDel\(comp);\n"
+				output += "        DEL: sawDel\(comp);\n"
 			}
-			
 			output += "        ligs: sawLig;\n"
 			
-			for (i, markClassName) in markClassNames.enumerated() {
-				output += "        marks_\(markClassName): sawMarkComp\(comp)_\(i);\n"
+			for markGroup in markGroups where usedSemantics.contains(markGroup.semantic) {
+				output += "        marks_\(markGroup.semantic): sawMark_\(markGroup.semantic)_comp\(comp);\n"
 			}
-			
 			output += "    };\n\n"
 		}
 		
@@ -481,29 +442,24 @@ struct ATIFGeneratorKerx {
 		
 		// DEL transitions
 		for comp in 0..<(componentCount - 1) {
-			let nextState = "SLig\(comp + 1)"
-			output += "    transition sawLigDel\(comp) {\n"
-			output += "        change state to \(nextState);\n"
+			output += "    transition sawDel\(comp) {\n"
+			output += "        change state to SLig\(comp + 1);\n"
 			output += "    };\n\n"
 		}
 		
 		// Mark transitions
 		for comp in 0..<componentCount {
-			let currentState = comp == 0 ? "SLig" : "SLig\(comp)"
+			let stateName = comp == 0 ? "SLig" : "SLig\(comp)"
 			
-			for (i, _) in markClassNames.enumerated() {
-				output += "    transition sawMarkComp\(comp)_\(i) {\n"
-				output += "        change state to \(currentState);\n"
-				output += "        kerning action: snapComp\(comp)Mark\(i);\n"
+			for (index, markGroup) in markGroups.enumerated() where usedSemantics.contains(markGroup.semantic) {
+				output += "    transition sawMark_\(markGroup.semantic)_comp\(comp) {\n"
+				output += "        change state to \(stateName);\n"
+				output += "        kerning action: snapComp\(comp)_\(markGroup.semantic);\n"
 				output += "    };\n"
 				
-				if !(comp == componentCount - 1 && i == markClassNames.count - 1) {
+				if !(comp == componentCount - 1 && index == markGroups.count - 1) {
 					output += "\n"
 				}
-			}
-			
-			if comp < componentCount - 1 {
-				output += "\n"
 			}
 		}
 		output += "\n"
@@ -511,46 +467,26 @@ struct ATIFGeneratorKerx {
 		// Anchor actions
 		output += "    // Anchor actions\n"
 		for comp in 0..<componentCount {
-			for (i, markClassName) in markClassNames.enumerated() {
-				guard let markClassIndex = markClassIndices[markClassName] else { continue }
+			for (index, markGroup) in markGroups.enumerated() where usedSemantics.contains(markGroup.semantic) {
+				guard let semanticIndex = orderedSemantics.firstIndex(of: markGroup.semantic) else {
+					continue
+				}
 				
-				let ligAnchorIndex = markClassIndex + (comp * markClassNames.count)
+				let ligAnchorIndex = semanticIndex + (comp * usedOrderedSemantics.count)
 				
-				output += "    anchor point action snapComp\(comp)Mark\(i) {\n"
+				output += "    anchor point action snapComp\(comp)_\(markGroup.semantic) {\n"
 				output += "        marked glyph point: \(ligAnchorIndex);\n"
-				output += "        current glyph point: \(markClassIndex);\n"
+				output += "        current glyph point: 0;\n"
 				output += "    };\n"
 				
-				if !(comp == componentCount - 1 && i == markClassNames.count - 1) {
+				if !(comp == componentCount - 1 && index == markGroups.count - 1) {
 					output += "\n"
 				}
-			}
-			
-			if comp < componentCount - 1 {
-				output += "\n"
 			}
 		}
 		
 		output += "};\n"
 		
 		return output
-	}
-	
-	// MARK: - Helper Functions
-	
-	/// Group ligatures by which mark classes they use
-	private static func groupLigaturesByMarkClasses(_ ligatures: [LigatureGlyph]) -> [(markClassNames: [String], ligatures: [LigatureGlyph])] {
-		var groups: [Set<String>: [LigatureGlyph]] = [:]
-		
-		for ligature in ligatures {
-			let markClassSet = Set(ligature.componentAnchors.keys)
-			if groups[markClassSet] != nil {
-				groups[markClassSet]?.append(ligature)
-			} else {
-				groups[markClassSet] = [ligature]
-			}
-		}
-		
-		return groups.map { (markClassNames: Array($0.key).sorted(), ligatures: $0.value) }
 	}
 }
