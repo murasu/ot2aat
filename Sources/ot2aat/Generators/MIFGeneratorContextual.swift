@@ -53,26 +53,132 @@ extension MIFGenerator {
         
         var tableNumber = 0
         
-        // Separate rules by type
-        let decomposedRules = singlePassRules.filter { $0.ruleGroupID != nil }
-        let regularRules = singlePassRules.filter { $0.ruleGroupID == nil }
+        // Separate "after" rules by BOTH pattern length AND context set
+        let allAfterRules = singlePassRules.filter {
+            if case .after = $0.context { return true }
+            return false
+        }
         
-        // Generate regular rules grouped by context type
-        let groupedRegular = Dictionary(grouping: regularRules) { rule -> String in
-            switch rule.context {
-            case .after: return "after"
-            case .before: return "before"
-            case .between: return "between"
-            case .when: return "when"
-            case .cleanup: return "cleanup"
+        // Group by pattern length first
+        let afterByLength = Dictionary(grouping: allAfterRules) { rule -> Int in
+            guard case .after(let context) = rule.context else { return 0 }
+            return context.count
+        }
+        
+        // For each length, further group by context set
+        var afterTableGroups: [(length: Int, contextKey: String, rules: [ExpandedContextualRule])] = []
+        
+        for (length, rulesForLength) in afterByLength {
+            if length == 1 {
+                // For single-element patterns, group by the actual context glyph
+                let grouped = Dictionary(grouping: rulesForLength) { rule -> String in
+                    guard case .after(let context) = rule.context else { return "" }
+                    return context[0] // Group by the single context glyph
+                }
+                
+                for (contextKey, rules) in grouped.sorted(by: { $0.key < $1.key }) {
+                    afterTableGroups.append((length: length, contextKey: contextKey, rules: rules))
+                }
+            } else {
+                // For multi-element patterns, keep them together
+                afterTableGroups.append((length: length, contextKey: "", rules: rulesForLength))
             }
         }
         
-        for (contextType, rulesForType) in groupedRegular.sorted(by: { $0.key < $1.key }) {
+        // Generate a separate table for each group
+        for group in afterTableGroups {
+            if tableNumber > 0 { output += "\n" }
+            
+            if group.length > 1 {
+                output += try generateMultiElementAfterSubtable(
+                    rules: group.rules,
+                    featureName: featureName,
+                    selectorNumber: selectorNumber,
+                    tableNumber: tableNumber
+                )
+            } else {
+                output += try generateContextualSubtable(
+                    rules: group.rules,
+                    contextType: "after",
+                    featureName: featureName,
+                    selectorNumber: selectorNumber,
+                    tableNumber: tableNumber
+                )
+            }
+            tableNumber += 1
+        }
+        
+        // Separate "before" rules by BOTH pattern length AND context set
+        let allBeforeRules = singlePassRules.filter {
+            if case .before = $0.context { return true }
+            return false
+        }
+        
+        // Group by pattern length first
+        let beforeByLength = Dictionary(grouping: allBeforeRules) { rule -> Int in
+            guard case .before(let context) = rule.context else { return 0 }
+            return context.count
+        }
+        
+        // For each length, further group by context set
+        var beforeTableGroups: [(length: Int, contextKey: String, rules: [ExpandedContextualRule])] = []
+        
+        for (length, rulesForLength) in beforeByLength {
+            if length == 1 {
+                // For single-element patterns, group by the actual context glyph
+                let grouped = Dictionary(grouping: rulesForLength) { rule -> String in
+                    guard case .before(let context) = rule.context else { return "" }
+                    return context[0] // Group by the single context glyph
+                }
+                
+                for (contextKey, rules) in grouped.sorted(by: { $0.key < $1.key }) {
+                    beforeTableGroups.append((length: length, contextKey: contextKey, rules: rules))
+                }
+            } else {
+                // For multi-element patterns, keep them together
+                beforeTableGroups.append((length: length, contextKey: "", rules: rulesForLength))
+            }
+        }
+        
+        // Generate a separate table for each group
+        for group in beforeTableGroups {
+            if tableNumber > 0 { output += "\n" }
+            
+            if group.length > 1 {
+                output += try generateMultiElementBeforeSubtable(
+                    rules: group.rules,
+                    featureName: featureName,
+                    selectorNumber: selectorNumber,
+                    tableNumber: tableNumber
+                )
+            } else {
+                output += try generateContextualSubtable(
+                    rules: group.rules,
+                    contextType: "before",
+                    featureName: featureName,
+                    selectorNumber: selectorNumber,
+                    tableNumber: tableNumber
+                )
+            }
+            tableNumber += 1
+        }
+        
+        // Between and when don't need context grouping
+        let allBetweenRules = singlePassRules.filter {
+            if case .between = $0.context { return true }
+            return false
+        }
+        
+        let allWhenRules = singlePassRules.filter {
+            if case .when = $0.context { return true }
+            return false
+        }
+        
+        if !allBetweenRules.isEmpty {
             if tableNumber > 0 { output += "\n" }
             output += try generateContextualSubtable(
-                rules: rulesForType,
-                contextType: contextType,
+                rules: allBetweenRules,
+                contextType: "between",
                 featureName: featureName,
                 selectorNumber: selectorNumber,
                 tableNumber: tableNumber
@@ -80,8 +186,20 @@ extension MIFGenerator {
             tableNumber += 1
         }
         
-        // Generate decomposed rules - EACH GROUP SEPARATELY
-        // First, collect unique group IDs
+        if !allWhenRules.isEmpty {
+            if tableNumber > 0 { output += "\n" }
+            output += try generateContextualSubtable(
+                rules: allWhenRules,
+                contextType: "when",
+                featureName: featureName,
+                selectorNumber: selectorNumber,
+                tableNumber: tableNumber
+            )
+            tableNumber += 1
+        }
+        
+        // Generate cleanup tables grouped by ruleGroupID
+        let decomposedRules = singlePassRules.filter { $0.ruleGroupID != nil }
         var seenGroupIDs = Set<String>()
         var orderedGroupIDs: [String] = []
         for rule in decomposedRules {
@@ -91,51 +209,9 @@ extension MIFGenerator {
             }
         }
         
-        // For each unique group, generate its complete set of tables
         for groupID in orderedGroupIDs.sorted() {
-            let rulesInGroup = decomposedRules.filter { $0.ruleGroupID == groupID }
-            
-            // Separate by context type within this group
-            let afterRules = rulesInGroup.filter { if case .after = $0.context { return true }; return false }
-            let beforeRules = rulesInGroup.filter { if case .before = $0.context { return true }; return false }
-            let betweenRules = rulesInGroup.filter { if case .between = $0.context { return true }; return false }
-            let cleanupRulesInGroup = rulesInGroup.filter { if case .cleanup = $0.context { return true }; return false }
-            
-            // Generate tables in order for this specific group
-            if !afterRules.isEmpty {
-                if tableNumber > 0 { output += "\n" }
-                output += try generateContextualSubtable(
-                    rules: afterRules,
-                    contextType: "after",
-                    featureName: featureName,
-                    selectorNumber: selectorNumber,
-                    tableNumber: tableNumber
-                )
-                tableNumber += 1
-            }
-            
-            if !beforeRules.isEmpty {
-                if tableNumber > 0 { output += "\n" }
-                output += try generateContextualSubtable(
-                    rules: beforeRules,
-                    contextType: "before",
-                    featureName: featureName,
-                    selectorNumber: selectorNumber,
-                    tableNumber: tableNumber
-                )
-                tableNumber += 1
-            }
-            
-            if !betweenRules.isEmpty {
-                if tableNumber > 0 { output += "\n" }
-                output += try generateContextualSubtable(
-                    rules: betweenRules,
-                    contextType: "between",
-                    featureName: featureName,
-                    selectorNumber: selectorNumber,
-                    tableNumber: tableNumber
-                )
-                tableNumber += 1
+            let cleanupRulesInGroup = decomposedRules.filter {
+                $0.ruleGroupID == groupID && $0.isCleanup
             }
             
             if !cleanupRulesInGroup.isEmpty {
@@ -175,6 +251,7 @@ extension MIFGenerator {
         
         return output
     }
+    
     
     private static func generateContextualSubtable(
         rules: [ExpandedContextualRule],
@@ -754,6 +831,239 @@ extension MIFGenerator {
             guard case .cleanup = rule.context else { continue }
             let (target, replacement) = rule.substitutions[0]
             output += "\(target)\t\t\(replacement)\n"
+        }
+        
+        return output
+    }
+    
+    // MARK: - Multi-Element After Context
+
+    private static func generateMultiElementAfterSubtable(
+        rules: [ExpandedContextualRule],
+        featureName: String,
+        selectorNumber: Int,
+        tableNumber: Int
+    ) throws -> String {
+        guard let firstRule = rules.first,
+              case .after(let sampleContext) = firstRule.context,
+              sampleContext.count >= 2 else {
+            throw OT2AATError.generationFailed("Multi-element after requires 2+ elements")
+        }
+        
+        let patternLength = sampleContext.count
+        
+        // Collect glyphs at each position
+        var glyphsByPosition: [[String]] = Array(repeating: [], count: patternLength)
+        var targetGlyphs = Set<String>()
+        
+        for rule in rules {
+            guard case .after(let context) = rule.context else { continue }
+            for (idx, glyph) in context.enumerated() {
+                if !glyphsByPosition[idx].contains(glyph) {
+                    glyphsByPosition[idx].append(glyph)
+                }
+            }
+            targetGlyphs.insert(rule.substitutions[0].target)
+        }
+        
+        var output = ""
+        
+        output += "// " + String(repeating: "-", count: 79) + "\n"
+        output += "// TABLE \(tableNumber): Contextual substitution (after \(patternLength)-element)\n"
+        output += "// " + String(repeating: "-", count: 79) + "\n\n"
+        
+        output += "Type\t\t\t\tContextual\n"
+        output += "Name\t\t\t\t\(featureName)\n"
+        output += "Namecode\t\t\t8\n"
+        output += "Setting\t\t\t\t\(featureName)\n"
+        output += "Settingcode\t\t\t\(selectorNumber)\n"
+        output += "Default\t\t\t\tyes\n"
+        output += "Orientation\t\t\tHV\n"
+        output += "Forward\t\t\t\tyes\n"
+        output += "Exclusive\t\t\tno\n\n"
+        
+        // Define class for each position
+        for (idx, glyphs) in glyphsByPosition.enumerated() {
+            output += "Context\(idx + 1)\t\t\t" + glyphs.sorted().joined(separator: " ") + "\n"
+        }
+        output += "TargetGlyphs\t\t" + targetGlyphs.sorted().joined(separator: " ") + "\n\n"
+        
+        // Build state array
+        output += "\t\t\t\tEOT\tOOB\tDEL\tEOL"
+        for idx in 0..<patternLength {
+            output += "\tContext\(idx + 1)"
+        }
+        output += "\tTargetGlyphs\n"
+        
+        // StartText state
+        output += "StartText\t\t1\t1\t1\t1"
+        output += "\t2"
+        for _ in 1..<patternLength {
+            output += "\t\t\t\t1"
+        }
+        output += "\t\t\t\t1\n"
+        
+        // StartLine state
+        output += "StartLine\t\t1\t1\t1\t1"
+        output += "\t2"
+        for _ in 1..<patternLength {
+            output += "\t\t\t\t1"
+        }
+        output += "\t\t\t\t1\n"
+        
+        // Intermediate states (SawContext1, SawContext2, etc.)
+        for stateIdx in 0..<(patternLength - 1) {
+            output += "SawContext\(stateIdx + 1)\t1\t1\t\(stateIdx + 2)\t1"
+            
+            for colIdx in 0..<patternLength {
+                if colIdx == stateIdx + 1 {
+                    output += "\t\(stateIdx + 3)"
+                } else {
+                    output += "\t\t\t\t1"
+                }
+            }
+            output += "\t\t\t\t1\n"
+        }
+        
+        // Final state (SawContextN)
+        output += "SawContext\(patternLength)\t1\t1\t\(patternLength + 1)\t1"
+        for _ in 0..<patternLength {
+            output += "\t\t\t\t1"
+        }
+        output += "\t\t\t\t\(patternLength + 2)\n\n"
+        
+        // Transitions
+        output += "\tGoTo\t\t\tMark?\tAdvance?\tSubstMark\tSubstCurrent\n"
+        output += "1\tStartText\t\tno\t\tyes\t\t\tnone\t\tnone\n"
+        
+        for stateIdx in 0..<patternLength {
+            output += "\(stateIdx + 2)\tSawContext\(stateIdx + 1)\tno\t\tyes\t\t\tnone\t\tnone\n"
+        }
+        
+        output += "\(patternLength + 2)\tSawContext\(patternLength)\tno\t\tyes\t\t\tnone\t\tdoSubst\n\n"
+        
+        output += "doSubst\n"
+        for rule in rules {
+            guard case .after = rule.context else { continue }
+            let (target, replacement) = rule.substitutions[0]
+            output += "\t\(target)\t\t\(replacement)\n"
+        }
+        
+        return output
+    }
+
+    // MARK: - Multi-Element Before Context
+
+    private static func generateMultiElementBeforeSubtable(
+        rules: [ExpandedContextualRule],
+        featureName: String,
+        selectorNumber: Int,
+        tableNumber: Int
+    ) throws -> String {
+        guard let firstRule = rules.first,
+              case .before(let sampleContext) = firstRule.context,
+              sampleContext.count >= 2 else {
+            throw OT2AATError.generationFailed("Multi-element before requires 2+ elements")
+        }
+        
+        let patternLength = sampleContext.count
+        
+        // Collect glyphs at each position
+        var targetGlyphs = Set<String>()
+        var glyphsByPosition: [[String]] = Array(repeating: [], count: patternLength)
+        
+        for rule in rules {
+            guard case .before(let context) = rule.context else { continue }
+            targetGlyphs.insert(rule.substitutions[0].target)
+            for (idx, glyph) in context.enumerated() {
+                if !glyphsByPosition[idx].contains(glyph) {
+                    glyphsByPosition[idx].append(glyph)
+                }
+            }
+        }
+        
+        var output = ""
+        
+        output += "// " + String(repeating: "-", count: 79) + "\n"
+        output += "// TABLE \(tableNumber): Contextual substitution (before \(patternLength)-element)\n"
+        output += "// " + String(repeating: "-", count: 79) + "\n\n"
+        
+        output += "Type\t\t\t\tContextual\n"
+        output += "Name\t\t\t\t\(featureName)\n"
+        output += "Namecode\t\t\t8\n"
+        output += "Setting\t\t\t\t\(featureName)\n"
+        output += "Settingcode\t\t\t\(selectorNumber)\n"
+        output += "Default\t\t\t\tyes\n"
+        output += "Orientation\t\t\tHV\n"
+        output += "Forward\t\t\t\tyes\n"
+        output += "Exclusive\t\t\tno\n\n"
+        
+        output += "TargetGlyphs\t\t" + targetGlyphs.sorted().joined(separator: " ") + "\n"
+        for (idx, glyphs) in glyphsByPosition.enumerated() {
+            output += "Context\(idx + 1)\t\t\t" + glyphs.sorted().joined(separator: " ") + "\n"
+        }
+        output += "\n"
+        
+        // Build state array
+        output += "\t\t\t\tEOT\tOOB\tDEL\tEOL\tTargetGlyphs"
+        for idx in 0..<patternLength {
+            output += "\tContext\(idx + 1)"
+        }
+        output += "\n"
+        
+        // StartText state
+        output += "StartText\t\t1\t1\t1\t1\t2"
+        for _ in 0..<patternLength {
+            output += "\t\t\t\t1"
+        }
+        output += "\n"
+        
+        // StartLine state
+        output += "StartLine\t\t1\t1\t1\t1\t2"
+        for _ in 0..<patternLength {
+            output += "\t\t\t\t1"
+        }
+        output += "\n"
+        
+        // SawTarget state
+        output += "SawTarget\t\t1\t1\t2\t1\t2"
+        output += "\t\t\t\t3"
+        for _ in 1..<patternLength {
+            output += "\t\t\t\t1"
+        }
+        output += "\n"
+        
+        // Intermediate states
+        for stateIdx in 1..<patternLength {
+            output += "SawContext\(stateIdx)\t1\t1\t\(stateIdx + 2)\t1\t2"
+            
+            for colIdx in 0..<patternLength {
+                if colIdx == stateIdx {
+                    output += "\t\t\t\t\(stateIdx + 3)"
+                } else {
+                    output += "\t\t\t\t1"
+                }
+            }
+            output += "\n"
+        }
+        output += "\n"
+        
+        // Transitions
+        output += "\tGoTo\t\t\tMark?\tAdvance?\tSubstMark\tSubstCurrent\n"
+        output += "1\tStartText\t\tno\t\tyes\t\t\tnone\t\tnone\n"
+        output += "2\tSawTarget\t\tyes\t\tyes\t\t\tdoSubst\t\tnone\n"
+        
+        for stateIdx in 0..<(patternLength - 1) {
+            output += "\(stateIdx + 3)\tSawContext\(stateIdx + 1)\tno\t\tyes\t\t\tdoSubst\t\tnone\n"
+        }
+        
+        output += "\(patternLength + 2)\tStartText\t\tno\t\tyes\t\t\tdoSubst\t\tnone\n\n"
+        
+        output += "doSubst\n"
+        for rule in rules {
+            guard case .before = rule.context else { continue }
+            let (target, replacement) = rule.substitutions[0]
+            output += "\t\(target)\t\t\(replacement)\n"
         }
         
         return output

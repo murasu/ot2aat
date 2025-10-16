@@ -22,82 +22,105 @@ struct ContextualRule {
 	
 	// MARK: - After Context
 	
-	private func expandAfter(pattern: [RuleElement], using registry: GlyphClassRegistry) throws -> [ExpandedContextualRule] {
-		let contextGlyphs = try resolveElements(pattern, using: registry)
-		let targetGlyphs = try resolveElements([substitutions[0].target], using: registry)
-		let replacementGlyphs = try resolveElements([substitutions[0].replacement], using: registry)
-		
-		guard targetGlyphs[0].count == replacementGlyphs[0].count else {
-			throw OT2AATError.invalidRule(
-				"Line \(lineNumber): Target and replacement class sizes must match (\(targetGlyphs[0].count) vs \(replacementGlyphs[0].count))"
-			)
-		}
-		
-		var rules: [ExpandedContextualRule] = []
-		for i in 0..<targetGlyphs[0].count {
-			rules.append(ExpandedContextualRule(
-				context: .after(contextGlyphs.map { $0[i % $0.count] }),
-				substitutions: [(target: targetGlyphs[0][i], replacement: replacementGlyphs[0][i])],
-				lineNumber: lineNumber
-				, ruleGroupID: nil
-			))
-		}
-		return rules
-	}
+    private func expandAfter(pattern: [RuleElement], using registry: GlyphClassRegistry) throws -> [ExpandedContextualRule] {
+        let contextGlyphs = try resolveElements(pattern, using: registry)
+        let targetGlyphs = try resolveElements([substitutions[0].target], using: registry)
+        let replacementGlyphs = try resolveElements([substitutions[0].replacement], using: registry)
+        
+        guard targetGlyphs[0].count == replacementGlyphs[0].count else {
+            throw OT2AATError.invalidRule(
+                "Line \(lineNumber): Target and replacement class sizes must match (\(targetGlyphs[0].count) vs \(replacementGlyphs[0].count))"
+            )
+        }
+        
+        var rules: [ExpandedContextualRule] = []
+        
+        // Generate cartesian product of all context positions
+        let contextCombinations = cartesianProduct(contextGlyphs)
+        
+        // For each context combination, create rules for all target/replacement pairs
+        for contextPattern in contextCombinations {
+            for targetIdx in 0..<targetGlyphs[0].count {
+                rules.append(ExpandedContextualRule(
+                    context: .after(contextPattern),
+                    substitutions: [(target: targetGlyphs[0][targetIdx], replacement: replacementGlyphs[0][targetIdx])],
+                    lineNumber: lineNumber,
+                    ruleGroupID: nil
+                ))
+            }
+        }
+        
+        return rules
+    }
 	
 	// MARK: - Before Context
 	
-	private func expandBefore(pattern: [RuleElement], using registry: GlyphClassRegistry) throws -> [ExpandedContextualRule] {
-		let contextGlyphs = try resolveElements(pattern, using: registry)
-		let targetGlyphs = try resolveElements([substitutions[0].target], using: registry)
-		let replacementGlyphs = try resolveElements([substitutions[0].replacement], using: registry)
-		
-		guard targetGlyphs[0].count == replacementGlyphs[0].count else {
-			throw OT2AATError.invalidRule(
-				"Line \(lineNumber): Target and replacement class sizes must match"
-			)
-		}
-		
-		var rules: [ExpandedContextualRule] = []
-		for i in 0..<targetGlyphs[0].count {
-			rules.append(ExpandedContextualRule(
-				context: .before(contextGlyphs.map { $0[i % $0.count] }),
-				substitutions: [(target: targetGlyphs[0][i], replacement: replacementGlyphs[0][i])],
-				lineNumber: lineNumber
-				, ruleGroupID: nil
-			))
-		}
-		return rules
-	}
+    private func expandBefore(pattern: [RuleElement], using registry: GlyphClassRegistry) throws -> [ExpandedContextualRule] {
+        let contextGlyphs = try resolveElements(pattern, using: registry)
+        let targetGlyphs = try resolveElements([substitutions[0].target], using: registry)
+        let replacementGlyphs = try resolveElements([substitutions[0].replacement], using: registry)
+        
+        guard targetGlyphs[0].count == replacementGlyphs[0].count else {
+            throw OT2AATError.invalidRule(
+                "Line \(lineNumber): Target and replacement class sizes must match"
+            )
+        }
+        
+        var rules: [ExpandedContextualRule] = []
+        
+        let contextCombinations = cartesianProduct(contextGlyphs)
+        
+        for contextPattern in contextCombinations {
+            for targetIdx in 0..<targetGlyphs[0].count {
+                rules.append(ExpandedContextualRule(
+                    context: .before(contextPattern),
+                    substitutions: [(target: targetGlyphs[0][targetIdx], replacement: replacementGlyphs[0][targetIdx])],
+                    lineNumber: lineNumber,
+                    ruleGroupID: nil
+                ))
+            }
+        }
+        
+        return rules
+    }
 	
 	// MARK: - Between Context
 	
-	private func expandBetween(first: [RuleElement], second: [RuleElement], using registry: GlyphClassRegistry) throws -> [ExpandedContextualRule] {
-		let firstGlyphs = try resolveElements(first, using: registry)
-		let secondGlyphs = try resolveElements(second, using: registry)
-		let targetGlyphs = try resolveElements([substitutions[0].target], using: registry)
-		let replacementGlyphs = try resolveElements([substitutions[0].replacement], using: registry)
-		
-		guard targetGlyphs[0].count == replacementGlyphs[0].count else {
-			throw OT2AATError.invalidRule(
-				"Line \(lineNumber): Target and replacement class sizes must match"
-			)
-		}
-		
-		var rules: [ExpandedContextualRule] = []
-		for i in 0..<targetGlyphs[0].count {
-			rules.append(ExpandedContextualRule(
-				context: .between(
-					first: firstGlyphs.map { $0[i % $0.count] },
-					second: secondGlyphs.map { $0[i % $0.count] }
-				),
-				substitutions: [(target: targetGlyphs[0][i], replacement: replacementGlyphs[0][i])],
-				lineNumber: lineNumber
-				, ruleGroupID: nil
-			))
-		}
-		return rules
-	}
+    private func expandBetween(first: [RuleElement], second: [RuleElement], using registry: GlyphClassRegistry) throws -> [ExpandedContextualRule] {
+        let firstGlyphs = try resolveElements(first, using: registry)
+        let secondGlyphs = try resolveElements(second, using: registry)
+        let targetGlyphs = try resolveElements([substitutions[0].target], using: registry)
+        let replacementGlyphs = try resolveElements([substitutions[0].replacement], using: registry)
+        
+        guard targetGlyphs[0].count == replacementGlyphs[0].count else {
+            throw OT2AATError.invalidRule(
+                "Line \(lineNumber): Target and replacement class sizes must match"
+            )
+        }
+        
+        var rules: [ExpandedContextualRule] = []
+        
+        let firstCombinations = cartesianProduct(firstGlyphs)
+        let secondCombinations = cartesianProduct(secondGlyphs)
+        
+        for firstPattern in firstCombinations {
+            for secondPattern in secondCombinations {
+                for targetIdx in 0..<targetGlyphs[0].count {
+                    rules.append(ExpandedContextualRule(
+                        context: .between(
+                            first: firstPattern,
+                            second: secondPattern
+                        ),
+                        substitutions: [(target: targetGlyphs[0][targetIdx], replacement: replacementGlyphs[0][targetIdx])],
+                        lineNumber: lineNumber,
+                        ruleGroupID: nil
+                    ))
+                }
+            }
+        }
+        
+        return rules
+    }
 	
 	// MARK: - When Context (with decomposition)
 	
@@ -312,4 +335,26 @@ struct ExpandedContextualRule {
 		}
 		return false
 	}
+}
+
+// MARK: - Helper: Cartesian Product
+
+/// Generate cartesian product of arrays
+/// Input: [[a, b], [1, 2, 3]] → Output: [[a, 1], [a, 2], [a, 3], [b, 1], [b, 2], [b, 3]]
+private func cartesianProduct(_ arrays: [[String]]) -> [[String]] {
+    guard !arrays.isEmpty else { return [[]] }
+    guard arrays.count > 1 else { return arrays[0].map { [$0] } }
+    
+    let first = arrays[0]
+    let rest = Array(arrays.dropFirst())
+    let restProduct = cartesianProduct(rest)
+    
+    var result: [[String]] = []
+    for item in first {
+        for combination in restProduct {
+            result.append([item] + combination)
+        }
+    }
+    
+    return result
 }

@@ -5,601 +5,629 @@ Convert OpenType GSUB (substitution) features to ot2aat .aar format
 SCOPE: GSUB features only (substitution, ligatures, contextual)
        GPOS (positioning) features are out of scope
 
+INPUT: OpenType feature file (.fea) converted from TTX
+       Use: ttx -t GSUB font.otf to extract, then convert to FEA
+
 Supports:
-- Type 1: Single substitution → noncontextual .aar
-- Type 2: Multiple substitution → .rules format (one-to-many)
-- Type 4: Ligature substitution → ligature .aar
-- Type 6: Contextual chaining substitution → contextual .aar
+- Type 1: Single substitution → @simple
+- Type 2: Multiple substitution → @one2many
+- Type 4: Ligature substitution → @ligature
+- Type 6: Contextual chaining substitution → @contextual
+
+Features:
+- Preserves feature order from original FEA
+- Filters by script (--script option)
+- Automatically inlines prefix lookups into contextual rules
+- Uses "when" context for multi-element patterns
+- Generates named classes for inline class patterns
+- Skips empty lookups
 """
 
 import re
 import sys
-from collections import defaultdict
-from typing import Dict, List, Tuple, Optional, Set
+import argparse
+from typing import Dict, List, Tuple, Optional
 
 # MARK: - Data Structures
 
+class LookupInfo:
+    """Metadata about a lookup"""
+    def __init__(self, name: str):
+        self.name = name
+        self.scripts = []
+        self.features = []
+        self.is_prefix = False
+
+
 class SingleSubstitution:
-    """Simple 1:1 glyph substitution"""
     def __init__(self, source: str, target: str):
         self.source = source
         self.target = target
 
 
 class LigatureSubstitution:
-    """Multiple glyphs → single ligature"""
     def __init__(self, target: str, components: List[str]):
         self.target = target
         self.components = components
 
 
 class MultipleSubstitution:
-    """Single glyph → multiple glyphs (decomposition)"""
     def __init__(self, source: str, targets: List[str]):
         self.source = source
         self.targets = targets
 
 
 class ContextualSubstitution:
-    """Context-based substitution"""
-    def __init__(self, context: List[str], marked_indices: List[int], 
+    def __init__(self, context: List[str], marked_indices: List[int],
                  substitutions: Dict[int, str], lookup_refs: Dict[int, str]):
-        self.context = context  # Full context pattern
-        self.marked_indices = marked_indices  # Which positions have '
-        self.substitutions = substitutions  # index -> replacement (unused now, will be inlined)
-        self.lookup_refs = lookup_refs  # index -> lookup name to inline
+        self.context = context
+        self.marked_indices = marked_indices
+        self.substitutions = substitutions
+        self.lookup_refs = lookup_refs
+
+
+class ParsedLookup:
+    def __init__(self, info: LookupInfo):
+        self.info = info
+        self.single_subs: List[SingleSubstitution] = []
+        self.ligatures: List[LigatureSubstitution] = []
+        self.multiple_subs: List[MultipleSubstitution] = []
+        self.contextual_subs: List[ContextualSubstitution] = []
+        self.local_classes: Dict[str, List[str]] = {}
+        self.raw_lines: List[str] = []
+    
+    def is_empty(self) -> bool:
+        """Check if lookup has any content"""
+        return not (self.single_subs or self.ligatures or
+                   self.multiple_subs or self.contextual_subs)
 
 
 # MARK: - Main Converter Class
 
 class GSUBToAAR:
-    def __init__(self):
-        # Store different substitution types
-        self.single_subs: List[SingleSubstitution] = []
-        self.ligatures: List[LigatureSubstitution] = []
-        self.multiple_subs: List[MultipleSubstitution] = []
-        self.contextual_subs: List[ContextualSubstitution] = []
-        
-        # Track lookups for inlining
-        self.lookups: Dict[str, List[str]] = {}
-        
-        # Track classes
+    def __init__(self, script_filter: Optional[List[str]] = None):
+        self.script_filter = script_filter
+        self.all_lookups: Dict[str, ParsedLookup] = {}
+        self.feature_order: List[Tuple[str, str, str]] = []
         self.global_classes: Dict[str, List[str]] = {}
+        self.inline_classes: Dict[str, List[str]] = {}  # Generated classes
+        self.class_counter = 0
     
-    def parse_class_definition(self, line: str) -> bool:
-        """Parse: @CLASS = [glyph1 glyph2 glyph3];"""
+    def parse_class_definition(self, line: str, class_dict: Dict[str, List[str]]) -> bool:
         pattern = r'@(\w+)\s*=\s*\[([^\]]+)\];'
         match = re.match(pattern, line.strip())
-        
         if match:
             class_name = match.group(1)
-            glyphs_str = match.group(2)
-            glyphs = [g.strip() for g in glyphs_str.split() if g.strip()]
-            
+            glyphs = [g.strip() for g in match.group(2).split() if g.strip()]
             if glyphs:
-                self.global_classes[class_name] = glyphs
-                print(f"  Defined class @{class_name} with {len(glyphs)} glyphs", 
-                      file=sys.stderr)
+                class_dict[class_name] = glyphs
             return True
         return False
     
     def expand_class_reference(self, element: str) -> List[str]:
-        """Expand @CLASS to list of glyphs, or return single glyph"""
         if element.startswith('@'):
             class_name = element[1:]
             if class_name in self.global_classes:
                 return self.global_classes[class_name]
-            else:
-                print(f"Warning: Undefined class @{class_name}", file=sys.stderr)
-                return []
-        else:
-            return [element]
+            for lookup in self.all_lookups.values():
+                if class_name in lookup.local_classes:
+                    return lookup.local_classes[class_name]
+            print(f"Warning: Undefined class @{class_name}", file=sys.stderr)
+            return []
+        return [element]
+    
+    def register_inline_class(self, glyphs: List[str]) -> str:
+        """Register an inline class and return a unique class name"""
+        # Check if this exact class already exists
+        glyphs_tuple = tuple(glyphs)
+        for class_name, existing_glyphs in self.inline_classes.items():
+            if tuple(existing_glyphs) == glyphs_tuple:
+                return f"@{class_name}"
+        
+        # Generate new class name
+        self.class_counter += 1
+        class_name = f"CLASS_{self.class_counter:03d}"
+        self.inline_classes[class_name] = glyphs
+        return f"@{class_name}"
+    
+    def process_pattern_element(self, element: str) -> str:
+        """
+        Process a pattern element: if it's an inline class, register it and return class reference.
+        Otherwise return the element as-is.
+        """
+        if element.startswith('[') and element.endswith(']'):
+            # Extract glyphs from inline class
+            glyphs = [g.strip() for g in element[1:-1].split() if g.strip()]
+            if glyphs:
+                return self.register_inline_class(glyphs)
+        return element
     
     def detect_substitution_type(self, line: str) -> Optional[str]:
-        """Detect GSUB lookup type from a substitution line"""
         line = line.strip()
-        
         if not line.startswith('sub '):
             return None
-        
-        # Type 6: Contextual (has ')
-        if "'" in line:
+        if "'" in line or 'by lookup' in line:
             return 'contextual'
-        
-        # Count elements on each side
         parts = line.split(' by ')
         if len(parts) != 2:
             return None
-        
-        left = parts[0].replace('sub ', '').strip()
-        right = parts[1].rstrip(';').strip()
-        
-        left_elements = left.split()
-        right_elements = right.split()
-        
-        # Type 2: Multiple substitution (1 → many)
-        if len(left_elements) == 1 and len(right_elements) > 1:
+        left = parts[0].replace('sub ', '').strip().split()
+        right = parts[1].rstrip(';').strip().split()
+        if len(left) == 1 and len(right) > 1:
             return 'multiple'
-        
-        # Type 4: Ligature (many → 1)
-        if len(left_elements) > 1 and len(right_elements) == 1:
+        if len(left) > 1 and len(right) == 1:
             return 'ligature'
-        
-        # Type 1: Single substitution (1 → 1)
-        if len(left_elements) == 1 and len(right_elements) == 1:
+        if len(left) == 1 and len(right) == 1:
             return 'single'
-        
         return None
     
-    def parse_single_substitution(self, line: str) -> bool:
-        """Parse: sub glyph1 by glyph2;"""
+    def parse_single_substitution(self, line: str, lookup: ParsedLookup) -> bool:
         pattern = r'sub\s+(\S+)\s+by\s+(\S+);'
         match = re.match(pattern, line.strip())
-        
         if match:
-            source = match.group(1)
-            target = match.group(2)
-            self.single_subs.append(SingleSubstitution(source, target))
+            lookup.single_subs.append(SingleSubstitution(match.group(1), match.group(2)))
             return True
         return False
     
-    def parse_ligature(self, line: str) -> bool:
-        """Parse: sub glyph1 glyph2 glyph3 by ligature;"""
+    def parse_ligature(self, line: str, lookup: ParsedLookup) -> bool:
         pattern = r'sub\s+(.*?)\s+by\s+(\S+);'
         match = re.match(pattern, line.strip())
-        
         if match:
-            components_str = match.group(1)
-            target = match.group(2)
-            components = [c.strip() for c in components_str.split() if c.strip()]
-            
+            components = [c.strip() for c in match.group(1).split() if c.strip()]
             if len(components) > 1:
-                self.ligatures.append(LigatureSubstitution(target, components))
+                lookup.ligatures.append(LigatureSubstitution(match.group(2), components))
                 return True
         return False
     
-    def parse_multiple_substitution(self, line: str) -> bool:
-        """Parse: sub glyph by glyph1 glyph2 glyph3;"""
+    def parse_multiple_substitution(self, line: str, lookup: ParsedLookup) -> bool:
         pattern = r'sub\s+(\S+)\s+by\s+(.*?);'
         match = re.match(pattern, line.strip())
-        
         if match:
-            source = match.group(1)
-            targets_str = match.group(2)
-            targets = [t.strip() for t in targets_str.split() if t.strip()]
-            
+            targets = [t.strip() for t in match.group(2).split() if t.strip()]
             if len(targets) > 1:
-                self.multiple_subs.append(MultipleSubstitution(source, targets))
+                lookup.multiple_subs.append(MultipleSubstitution(match.group(1), targets))
                 return True
         return False
     
-    def parse_contextual_substitution(self, line: str) -> bool:
-        """Parse: sub glyph1' lookup LOOKUP context' lookup LOOKUP2;"""
-        # Basic pattern for contextual with marks
-        if "'" not in line:
+    def parse_contextual_substitution(self, line: str, lookup: ParsedLookup) -> bool:
+        if 'by lookup' not in line:
             return False
         
-        # Extract the pattern
-        pattern = r'sub\s+(.*?);'
+        pattern = r'sub\s+(.*?)\s+by\s+(lookup_\d+);'
         match = re.match(pattern, line.strip())
-        
         if not match:
             return False
         
-        content = match.group(1)
+        pattern_part = match.group(1).strip()
+        lookup_name = match.group(2).strip()
         
-        # First, expand inline classes [glyph1 glyph2 glyph3] to separate elements
-        # Replace brackets with spaces to treat glyphs as separate elements
-        content = content.replace('[', '').replace(']', '')
-        
-        elements = content.split()
-        
-        context = []
+        elements = []
         marked_indices = []
-        lookup_refs = {}
-        
-        i = 0
         idx = 0
-        while i < len(elements):
-            elem = elements[i]
+        i = 0
+        
+        while i < len(pattern_part):
+            while i < len(pattern_part) and pattern_part[i].isspace():
+                i += 1
+            if i >= len(pattern_part):
+                break
             
-            if elem == 'lookup':
-                # Next element is lookup name
-                if i + 1 < len(elements):
-                    lookup_name = elements[i + 1]
-                    # Associate with previous marked position
-                    if marked_indices:
-                        lookup_refs[marked_indices[-1]] = lookup_name
-                    i += 2
-                    continue
-            
-            # Check if marked
-            if elem.endswith("'"):
-                clean_elem = elem.rstrip("'")
-                context.append(clean_elem)
-                marked_indices.append(idx)
+            if pattern_part[i] == '[':
+                end = pattern_part.find(']', i)
+                if end == -1:
+                    break
+                class_content = pattern_part[i+1:end]
+                is_marked = (end + 1 < len(pattern_part) and pattern_part[end + 1] == "'")
+                elements.append('[' + class_content + ']')
+                if is_marked:
+                    marked_indices.append(idx)
+                    i = end + 2
+                else:
+                    i = end + 1
                 idx += 1
             else:
-                context.append(elem)
+                start = i
+                while i < len(pattern_part) and not pattern_part[i].isspace() and pattern_part[i] not in '[]':
+                    i += 1
+                token = pattern_part[start:i]
+                if token.endswith("'"):
+                    elements.append(token[:-1])
+                    marked_indices.append(idx)
+                else:
+                    elements.append(token)
                 idx += 1
-            
-            i += 1
         
-        if context and marked_indices:
-            self.contextual_subs.append(
-                ContextualSubstitution(context, marked_indices, {}, lookup_refs)
-            )
-            return True
+        if not elements or not marked_indices:
+            return False
         
-        return False
+        lookup_refs = {marked_idx: lookup_name for marked_idx in marked_indices}
+        lookup.contextual_subs.append(
+            ContextualSubstitution(elements, marked_indices, {}, lookup_refs)
+        )
+        return True
     
-    def parse_lookup(self, lines: List[str], start_idx: int) -> int:
-        """Parse lookup definition"""
-        line = lines[start_idx].strip()
-        
-        if not line.startswith('lookup '):
-            return 0
-        
-        lookup_match = re.match(r'lookup\s+(\S+)', line)
-        if not lookup_match:
-            return 0
-        
-        lookup_name = lookup_match.group(1)
-        lookup_contents = []
-        
-        lines_consumed = 1
-        
+    def parse_lookup_body(self, lines: List[str], start_idx: int, lookup: ParsedLookup) -> int:
+        lines_consumed = 0
         while start_idx + lines_consumed < len(lines):
             current_line = lines[start_idx + lines_consumed].strip()
-            
             if current_line.startswith('}'):
                 lines_consumed += 1
                 break
-            
             if not current_line or current_line.startswith('#'):
                 lines_consumed += 1
                 continue
-            
-            # Remove comments
             current_line = re.sub(r'#.*$', '', current_line).strip()
-            
-            # Class definition inside lookup
-            if current_line.startswith('@') and '=' in current_line:
-                self.parse_class_definition(current_line)
+            if current_line.startswith('lookupflag'):
+                lookup.raw_lines.append(current_line)
                 lines_consumed += 1
                 continue
-            
-            # Substitution rules
+            if current_line.startswith('@') and '=' in current_line:
+                self.parse_class_definition(current_line, lookup.local_classes)
+                lines_consumed += 1
+                continue
             if current_line.startswith('sub '):
                 sub_type = self.detect_substitution_type(current_line)
-                
                 if sub_type == 'single':
-                    self.parse_single_substitution(current_line)
+                    self.parse_single_substitution(current_line, lookup)
                 elif sub_type == 'ligature':
-                    self.parse_ligature(current_line)
+                    self.parse_ligature(current_line, lookup)
                 elif sub_type == 'multiple':
-                    self.parse_multiple_substitution(current_line)
+                    self.parse_multiple_substitution(current_line, lookup)
                 elif sub_type == 'contextual':
-                    self.parse_contextual_substitution(current_line)
-                
-                # Store raw line in lookup for potential inlining
-                lookup_contents.append(current_line)
-            
+                    self.parse_contextual_substitution(current_line, lookup)
+                lookup.raw_lines.append(current_line)
             lines_consumed += 1
+        return lines_consumed
+    
+    def parse_feature_block(self, lines: List[str], start_idx: int) -> int:
+        line = lines[start_idx].strip()
+        feature_match = re.match(r'feature\s+(\w+)', line)
+        if not feature_match:
+            return 0
         
-        self.lookups[lookup_name] = lookup_contents
-        print(f"  Parsed lookup {lookup_name} with {len(lookup_contents)} rules", 
-              file=sys.stderr)
+        feature_name = feature_match.group(1)
+        lines_consumed = 1
+        current_script = None
         
+        while start_idx + lines_consumed < len(lines):
+            current_line = lines[start_idx + lines_consumed].strip()
+            if current_line.startswith('}'):
+                lines_consumed += 1
+                break
+            script_match = re.match(r'script\s+(\w+);', current_line)
+            if script_match:
+                current_script = script_match.group(1)
+                lines_consumed += 1
+                continue
+            lookup_match = re.match(r'lookup\s+(\S+);', current_line)
+            if lookup_match:
+                lookup_name = lookup_match.group(1)
+                self.feature_order.append((feature_name, current_script or 'DFLT', lookup_name))
+            lines_consumed += 1
         return lines_consumed
     
     def parse_file(self, content: str):
-        """Parse entire OpenType feature file"""
         lines = content.split('\n')
         i = 0
-        
         print(f"Parsing {len(lines)} lines...", file=sys.stderr)
         
         while i < len(lines):
             line = lines[i].strip()
-            
             if not line or line.startswith('#'):
                 i += 1
                 continue
             
-            # Remove comments
-            line = re.sub(r'#.*$', '', line).strip()
-            
-            # Class definition
-            if line.startswith('@') and '=' in line:
-                if self.parse_class_definition(line):
+            if line.startswith('lookup '):
+                lookup_match = re.match(r'lookup\s+(\S+)\s*\{', line)
+                if lookup_match:
+                    lookup_name = lookup_match.group(1)
+                    info = LookupInfo(lookup_name)
+                    parsed_lookup = ParsedLookup(info)
                     i += 1
+                    consumed = self.parse_lookup_body(lines, i, parsed_lookup)
+                    i += consumed
+                    self.all_lookups[lookup_name] = parsed_lookup
+                    print(f"  Parsed lookup {lookup_name}", file=sys.stderr)
                     continue
             
-            # Lookup definition
-            consumed = self.parse_lookup(lines, i)
-            if consumed > 0:
-                i += consumed
+            if line.startswith('@') and '=' in line:
+                self.parse_class_definition(line, self.global_classes)
+                i += 1
                 continue
             
+            if line.startswith('feature '):
+                consumed = self.parse_feature_block(lines, i)
+                if consumed > 0:
+                    i += consumed
+                    continue
             i += 1
         
-        # Print summary
+        # Mark prefix lookups and assign scripts
+        referenced_lookups = set()
+        for feature_name, script, lookup_name in self.feature_order:
+            referenced_lookups.add(lookup_name)
+            if lookup_name in self.all_lookups:
+                lookup = self.all_lookups[lookup_name]
+                if feature_name not in lookup.info.features:
+                    lookup.info.features.append(feature_name)
+                if script and script not in lookup.info.scripts:
+                    lookup.info.scripts.append(script)
+        
+        for lookup_name, lookup in self.all_lookups.items():
+            if lookup_name not in referenced_lookups:
+                lookup.info.is_prefix = True
+        
         print(f"\nParsed content:", file=sys.stderr)
-        print(f"  Global classes: {len(self.global_classes)}", file=sys.stderr)
-        print(f"  Single substitutions: {len(self.single_subs)}", file=sys.stderr)
-        print(f"  Ligatures: {len(self.ligatures)}", file=sys.stderr)
-        print(f"  Multiple substitutions: {len(self.multiple_subs)}", file=sys.stderr)
-        print(f"  Contextual substitutions: {len(self.contextual_subs)}", file=sys.stderr)
+        print(f"  Total lookups: {len(self.all_lookups)}", file=sys.stderr)
+        print(f"  Prefix lookups: {sum(1 for l in self.all_lookups.values() if l.info.is_prefix)}", file=sys.stderr)
+        print(f"  Feature lookups: {sum(1 for l in self.all_lookups.values() if not l.info.is_prefix)}", file=sys.stderr)
+        print(f"  Feature order entries: {len(self.feature_order)}", file=sys.stderr)
+    
+    def should_include_lookup(self, lookup: ParsedLookup) -> bool:
+        if lookup.info.is_prefix or lookup.is_empty():
+            return False
+        if not self.script_filter:
+            return True
+        return any(script in lookup.info.scripts for script in self.script_filter)
     
     def inline_lookup_substitutions(self, lookup_name: str) -> Dict[str, str]:
-        """
-        Extract all single substitutions from a lookup.
-        Returns dict of {source: target}.
-        If same source appears multiple times, last one wins.
-        """
-        if lookup_name not in self.lookups:
+        if lookup_name not in self.all_lookups:
             print(f"ERROR: Lookup '{lookup_name}' not found!", file=sys.stderr)
             return {}
-        
-        substitutions = {}
-        lookup_rules = self.lookups[lookup_name]
-        
-        for rule in lookup_rules:
-            # Only handle simple substitutions for now
-            pattern = r'sub\s+(\S+)\s+by\s+(\S+);'
-            match = re.match(pattern, rule.strip())
-            if match:
-                source = match.group(1)
-                target = match.group(2)
-                # Last one wins
-                substitutions[source] = target
-        
-        return substitutions
+        lookup = self.all_lookups[lookup_name]
+        return {sub.source: sub.target for sub in lookup.single_subs}
     
-    def generate_simple_context(self, ctx: ContextualSubstitution) -> List[str]:
-        """Generate after/before/between context rule. Returns list of rules."""
+    def generate_contextual_rules(self, ctx: ContextualSubstitution) -> List[str]:
+        """Generate contextual rules - preserving multi-element patterns with named classes"""
+        
+        # Get marked position
         marked_pos = ctx.marked_indices[0]
+        
+        # Check for lookup reference
+        if marked_pos not in ctx.lookup_refs:
+            return [f"# ERROR: No lookup reference for marked position {marked_pos}"]
+        
+        # Get target element at marked position and expand it to individual glyphs
+        target_element = ctx.context[marked_pos]
+        if target_element.startswith('[') and target_element.endswith(']'):
+            # It's an inline class - extract individual glyphs
+            valid_sources = [g.strip() for g in target_element[1:-1].split() if g.strip()]
+        else:
+            # It's a glyph or class reference - expand it
+            valid_sources = self.expand_class_reference(target_element)
+        
+        if not valid_sources:
+            return [f"# ERROR: Cannot expand: {target_element}"]
+        
+        # Get substitutions from referenced lookup
+        lookup_name = ctx.lookup_refs[marked_pos]
+        all_subs = self.inline_lookup_substitutions(lookup_name)
+        if not all_subs:
+            return [f"# ERROR: No substitutions in {lookup_name}"]
+        
+        # Filter substitutions to only those matching valid sources
+        filtered_subs = {src: tgt for src, tgt in all_subs.items() if src in valid_sources}
+        if not filtered_subs:
+            return [f"# ERROR: No matching substitutions for {target_element}"]
+        
+        # Generate rules - one per marked glyph substitution
+        rules = []
         pattern_length = len(ctx.context)
         
-        # Get the target and replacement from lookup
-        lookup_name = ctx.lookup_refs[marked_pos]
-        substitutions = self.inline_lookup_substitutions(lookup_name)
+        if pattern_length == 1:
+            # Single element pattern - shouldn't happen in contextual
+            return [f"# ERROR: Single element context pattern: {' '.join(ctx.context)}"]
         
-        if not substitutions:
-            return [f"# ERROR: No substitutions found in lookup {lookup_name}"]
-        
-        target_glyph = ctx.context[marked_pos]
-        
-        # Determine context type
-        if marked_pos == 0 and pattern_length > 1:
-            # BEFORE context (first position marked)
-            context_after = ' '.join(ctx.context[1:])
+        # Multi-element pattern - determine context type based on marked position
+        if marked_pos == 0:
+            # Marked at beginning - use "before" context
+            # Pattern: marked_glyph following_context
+            # Build the following context (everything after marked position)
+            context_parts = []
+            for i in range(1, pattern_length):
+                context_parts.append(self.process_pattern_element(ctx.context[i]))
+            context_str = ' '.join(context_parts)
             
-            # Generate rules for each substitution
-            rules = []
-            for source, target in substitutions.items():
-                rules.append(f"before {context_after}: {source} => {target}")
-            return rules
+            for source, target in filtered_subs.items():
+                rules.append(f"before {context_str}: {source} => {target}")
         
-        elif marked_pos == pattern_length - 1 and pattern_length > 1:
-            # AFTER context (last position marked)
-            context_before = ' '.join(ctx.context[:-1])
+        elif marked_pos == pattern_length - 1:
+            # Marked at end - use "after" context
+            # Pattern: preceding_context marked_glyph
+            # Build the preceding context (everything before marked position)
+            context_parts = []
+            for i in range(0, marked_pos):
+                context_parts.append(self.process_pattern_element(ctx.context[i]))
+            context_str = ' '.join(context_parts)
             
-            rules = []
-            for source, target in substitutions.items():
-                rules.append(f"after {context_before}: {source} => {target}")
-            return rules
-        
-        elif 0 < marked_pos < pattern_length - 1:
-            # BETWEEN context (middle position marked)
-            context_before = ' '.join(ctx.context[:marked_pos])
-            context_after = ' '.join(ctx.context[marked_pos+1:])
-            
-            rules = []
-            for source, target in substitutions.items():
-                rules.append(f"between {context_before} and {context_after}: {source} => {target}")
-            return rules
+            for source, target in filtered_subs.items():
+                rules.append(f"after {context_str}: {source} => {target}")
         
         else:
-            return [f"# ERROR: Cannot determine context type for pattern: {' '.join(ctx.context)}"]
+            # Marked in middle - use "between" context
+            # Pattern: before_context marked_glyph after_context
+            # Build before context
+            before_parts = []
+            for i in range(0, marked_pos):
+                before_parts.append(self.process_pattern_element(ctx.context[i]))
+            before_str = ' '.join(before_parts)
+            
+            # Build after context
+            after_parts = []
+            for i in range(marked_pos + 1, pattern_length):
+                after_parts.append(self.process_pattern_element(ctx.context[i]))
+            after_str = ' '.join(after_parts)
+            
+            for source, target in filtered_subs.items():
+                rules.append(f"between {before_str} and {after_str}: {source} => {target}")
+        
+        return rules
     
-    def generate_when_context(self, ctx: ContextualSubstitution) -> str:
-        """Generate when context rule with multiple substitutions - single line"""
-        pattern = ' '.join(ctx.context)
-        
-        # Check pattern length
-        if len(ctx.context) > 10:
-            return f"# ERROR: Pattern too long ({len(ctx.context)} elements, max 10): {pattern}"
-        
-        # Collect all substitutions from all marked positions
-        all_subs = []
-        
-        for marked_pos in ctx.marked_indices:
-            if marked_pos not in ctx.lookup_refs:
-                continue
-            
-            lookup_name = ctx.lookup_refs[marked_pos]
-            substitutions = self.inline_lookup_substitutions(lookup_name)
-            
-            if not substitutions:
-                print(f"WARNING: No substitutions in lookup {lookup_name}", file=sys.stderr)
-                continue
-            
-            # Get the target glyph from the pattern
-            target_glyph = ctx.context[marked_pos]
-            
-            # For each substitution in the lookup
-            for source, replacement in substitutions.items():
-                # Only include if source matches the pattern element
-                if source == target_glyph or target_glyph.startswith('@'):
-                    all_subs.append(f"{source} => {replacement}")
-        
-        if not all_subs:
-            return f"# ERROR: No valid substitutions for pattern: {pattern}"
-        
-        # Format everything on a single line with comma separation
-        subs_str = ', '.join(all_subs)
-        return f"when {pattern}: {subs_str}"
-    
-    def generate_contextual_section(self) -> str:
-        """Generate the @contextual section of .aar output"""
-        if not self.contextual_subs:
-            return ""
-        
+    def generate_lookup_output(self, lookup: ParsedLookup) -> List[str]:
         output = []
         output.append("# " + "-" * 76)
-        output.append("# CONTEXTUAL SUBSTITUTIONS (Type 6)")
+        output.append(f"# Lookup: {lookup.info.name}")
+        if lookup.info.features:
+            output.append(f"# Features: {', '.join(lookup.info.features)}")
+        if lookup.info.scripts:
+            output.append(f"# Scripts: {', '.join(lookup.info.scripts)}")
         output.append("# " + "-" * 76)
-        output.append("")
-        output.append("@contextual {")
         
-        for ctx in self.contextual_subs:
-            num_marked = len(ctx.marked_indices)
-            
-            if num_marked == 0:
-                output.append("    # ERROR: No marked positions in pattern")
-                continue
-            
-            # Check for lookupflag issues
-            has_lookupflag = False
-            for lookup_name in ctx.lookup_refs.values():
-                if lookup_name in self.lookups:
-                    # Check if any line has lookupflag
-                    for line in self.lookups[lookup_name]:
-                        if 'lookupflag' in line.lower():
-                            # Extract the filtering set if present for more info
-                            if 'UseMarkFilteringSet' in line:
-                                output.append(f"    # NOTE: Lookup {lookup_name} has UseMarkFilteringSet - AAT uses exact sequential matching")
-                            else:
-                                output.append(f"    # NOTE: Lookup {lookup_name} has lookupflag - behavior may differ in AAT")
-                            break
-            
-            if num_marked == 1:
-                # Simple context - returns list of rules
-                rules = self.generate_simple_context(ctx)
+        has_lookupflag = any('lookupflag' in line.lower() for line in lookup.raw_lines)
+        if has_lookupflag:
+            output.append("# NOTE: Original lookup has lookupflag - AAT uses exact sequential matching")
+        
+        if lookup.single_subs:
+            output.append("@simple {")
+            for sub in lookup.single_subs:
+                output.append(f"    {sub.source} -> {sub.target}")
+            output.append("}")
+        
+        if lookup.ligatures:
+            output.append("@ligature {")
+            for lig in lookup.ligatures:
+                components = ' + '.join(lig.components)
+                output.append(f"    {lig.target} := {components}")
+            output.append("}")
+        
+        if lookup.multiple_subs:
+            output.append("@one2many {")
+            for mult in lookup.multiple_subs:
+                targets = ' '.join(mult.targets)
+                output.append(f"    {mult.source} > {targets}")
+            output.append("}")
+        
+        if lookup.contextual_subs:
+            output.append("@contextual {")
+            for ctx in lookup.contextual_subs:
+                rules = self.generate_contextual_rules(ctx)
                 for rule in rules:
                     output.append(f"    {rule}")
-            else:
-                # When context with multiple substitutions - returns single line
-                rule = self.generate_when_context(ctx)
-                output.append(f"    {rule}")
+            output.append("}")
         
-        output.append("}")
         output.append("")
+        return output
+    
+    def preprocess_inline_classes(self):
+        """Pre-process all contextual rules to collect inline classes before output generation"""
+        print("Pre-processing inline classes...", file=sys.stderr)
         
-        return '\n'.join(output)
+        for feature_name, script, lookup_name in self.feature_order:
+            if lookup_name not in self.all_lookups:
+                continue
+            
+            lookup = self.all_lookups[lookup_name]
+            if not self.should_include_lookup(lookup):
+                continue
+            
+            # Process all contextual substitutions to register inline classes
+            for ctx in lookup.contextual_subs:
+                # Process each element in the context pattern
+                for i, elem in enumerate(ctx.context):
+                    # Only process non-marked positions (marked positions become individual glyphs)
+                    if i not in ctx.marked_indices:
+                        self.process_pattern_element(elem)
+        
+        print(f"  Collected {len(self.inline_classes)} inline classes", file=sys.stderr)
     
     def generate_output(self) -> str:
-        """Generate unified .aar format output"""
-        output = []
+        # Pre-process to collect all inline classes first
+        self.preprocess_inline_classes()
         
+        output = []
         output.append("# " + "=" * 76)
-        output.append("# Converted from OpenType GSUB format to unified .aar format")
+        output.append("# Converted from OpenType GSUB to unified .aar format")
+        output.append("# Source: FEA converted from TTX (ttx -t GSUB font.otf)")
+        if self.script_filter:
+            output.append(f"# Script filter: {', '.join(self.script_filter)}")
         output.append("# " + "=" * 76)
         output.append("")
         
-        # Global classes
+        # Output global classes (from FEA file)
         if self.global_classes:
             output.append("# " + "-" * 76)
-            output.append("# GLOBAL CLASS DEFINITIONS")
+            output.append("# GLOBAL CLASS DEFINITIONS (from source)")
             output.append("# " + "-" * 76)
             output.append("")
-            
             for class_name in sorted(self.global_classes.keys()):
                 glyphs = self.global_classes[class_name]
                 output.append(f"@class {class_name} = {' '.join(glyphs)}")
-            
             output.append("")
         
-        # Simple substitutions → @simple section
-        if self.single_subs:
+        # Output generated inline classes
+        if self.inline_classes:
             output.append("# " + "-" * 76)
-            output.append("# SIMPLE SUBSTITUTIONS (Type 1)")
+            output.append("# GENERATED CLASS DEFINITIONS (from inline classes)")
             output.append("# " + "-" * 76)
             output.append("")
-            output.append("@simple {")
-            
-            for sub in self.single_subs:
-                output.append(f"    {sub.source} -> {sub.target}")
-            
-            output.append("}")
+            for class_name in sorted(self.inline_classes.keys()):
+                glyphs = self.inline_classes[class_name]
+                output.append(f"@class {class_name} = {' '.join(glyphs)}")
             output.append("")
         
-        # Ligatures → @ligature section
-        if self.ligatures:
-            output.append("# " + "-" * 76)
-            output.append("# LIGATURES (Type 4)")
-            output.append("# " + "-" * 76)
-            output.append("")
-            output.append("@ligature {")
-            
-            for lig in self.ligatures:
-                components = ' + '.join(lig.components)
-                output.append(f"    {lig.target} := {components}")
-            
-            output.append("}")
-            output.append("")
+        current_feature = None
+        processed_lookups = set()
         
-        # Multiple substitutions → @one2many section
-        if self.multiple_subs:
-            output.append("# " + "-" * 76)
-            output.append("# MULTIPLE SUBSTITUTIONS (Type 2)")
-            output.append("# " + "-" * 76)
-            output.append("")
-            output.append("@one2many {")
+        for feature_name, script, lookup_name in self.feature_order:
+            if lookup_name not in self.all_lookups:
+                continue
             
-            for mult in self.multiple_subs:
-                targets = ' '.join(mult.targets)
-                output.append(f"    {mult.source} > {targets}")
+            lookup = self.all_lookups[lookup_name]
+            if not self.should_include_lookup(lookup) or lookup_name in processed_lookups:
+                continue
             
-            output.append("}")
-            output.append("")
-        
-        # Contextual substitutions
-        contextual_section = self.generate_contextual_section()
-        if contextual_section:
-            output.append(contextual_section)
+            if feature_name != current_feature:
+                current_feature = feature_name
+                output.append("")
+                output.append("# " + "=" * 76)
+                output.append(f"# Feature: {feature_name}")
+                if lookup.info.scripts:
+                    output.append(f"# Scripts: {', '.join(set(lookup.info.scripts))}")
+                output.append("# " + "=" * 76)
+                output.append("")
+            
+            lookup_output = self.generate_lookup_output(lookup)
+            output.extend(lookup_output)
+            processed_lookups.add(lookup_name)
         
         return '\n'.join(output)
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python3 gsubfea2aar.py input.fea [output.aar]")
-        print()
-        print("Convert OpenType GSUB (substitution) features to .aar format")
-        print()
-        print("Scope: GSUB only (substitution, ligatures, contextual)")
-        print("       GPOS (positioning) is out of scope")
-        print()
-        print("Examples:")
-        print("  python3 gsubfea2aar.py subs.fea")
-        print("  python3 gsubfea2aar.py subs.fea converted.aar")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description='Convert OpenType GSUB features to .aar format',
+        epilog='Input: FEA file converted from TTX (ttx -t GSUB font.otf)'
+    )
+    parser.add_argument('input', help='Input .fea file')
+    parser.add_argument('output', nargs='?', help='Output .aar file (default: stdout)')
+    parser.add_argument('--script', '-s', help='Filter by script(s), comma-separated')
     
-    input_file = sys.argv[1]
-    output_file = sys.argv[2] if len(sys.argv) > 2 else None
+    args = parser.parse_args()
+    
+    script_filter = None
+    if args.script:
+        script_filter = [s.strip() for s in args.script.split(',')]
+        print(f"Filtering by scripts: {', '.join(script_filter)}", file=sys.stderr)
     
     try:
-        with open(input_file, 'r', encoding='utf-8') as f:
+        with open(args.input, 'r', encoding='utf-8') as f:
             content = f.read()
     except FileNotFoundError:
-        print(f"Error: File not found: {input_file}")
+        print(f"Error: File not found: {args.input}")
         sys.exit(1)
     except Exception as e:
         print(f"Error reading file: {e}")
         sys.exit(1)
     
-    converter = GSUBToAAR()
+    converter = GSUBToAAR(script_filter=script_filter)
     converter.parse_file(content)
     output = converter.generate_output()
     
-    if output_file:
+    if args.output:
         try:
-            with open(output_file, 'w', encoding='utf-8') as f:
+            with open(args.output, 'w', encoding='utf-8') as f:
                 f.write(output)
-            print(f"\nSuccessfully converted to: {output_file}")
+            print(f"\nSuccessfully converted to: {args.output}", file=sys.stderr)
         except Exception as e:
             print(f"Error writing file: {e}")
             sys.exit(1)
@@ -610,4 +638,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-    

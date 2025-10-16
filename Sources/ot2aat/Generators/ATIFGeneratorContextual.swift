@@ -59,32 +59,141 @@ extension ATIFGenerator {
         
         var subtableNumber = 0
         
-        // Separate rules by type
-        let decomposedRules = singlePassRules.filter { $0.ruleGroupID != nil }
-        let regularRules = singlePassRules.filter { $0.ruleGroupID == nil }
+        // Separate "after" rules by BOTH pattern length AND context set
+        let allAfterRules = singlePassRules.filter {
+            if case .after = $0.context { return true }
+            return false
+        }
         
-        // Generate regular rules grouped by context type
-        let groupedRegular = Dictionary(grouping: regularRules) { rule -> String in
-            switch rule.context {
-            case .after: return "after"
-            case .before: return "before"
-            case .between: return "between"
-            case .when: return "when"
-            case .cleanup: return "cleanup"
+        // Group by pattern length first
+        let afterByLength = Dictionary(grouping: allAfterRules) { rule -> Int in
+            guard case .after(let context) = rule.context else { return 0 }
+            return context.count
+        }
+        
+        // For each length, further group by context set
+        var afterSubtableGroups: [(length: Int, contextKey: String, rules: [ExpandedContextualRule])] = []
+        
+        for (length, rulesForLength) in afterByLength {
+            if length == 1 {
+                // For single-element patterns, group by the actual context glyph
+                let grouped = Dictionary(grouping: rulesForLength) { rule -> String in
+                    guard case .after(let context) = rule.context else { return "" }
+                    return context[0] // Group by the single context glyph
+                }
+                
+                for (contextKey, rules) in grouped.sorted(by: { $0.key < $1.key }) {
+                    afterSubtableGroups.append((length: length, contextKey: contextKey, rules: rules))
+                }
+            } else {
+                // For multi-element patterns, keep them together
+                afterSubtableGroups.append((length: length, contextKey: "", rules: rulesForLength))
             }
         }
         
-        for (contextType, rulesForType) in groupedRegular.sorted(by: { $0.key < $1.key }) {
+        // Generate a separate subtable for each group
+        for group in afterSubtableGroups {
+            if subtableNumber > 0 { output += "\n" }
+            
+            if group.length > 1 {
+                output += try generateMultiElementAfterSubtable(
+                    rules: group.rules,
+                    subtableNumber: subtableNumber
+                )
+            } else {
+                output += try generateContextualSubtable(
+                    rules: group.rules,
+                    contextType: "after",
+                    subtableNumber: subtableNumber
+                )
+            }
+            subtableNumber += 1
+        }
+        
+        // Separate "before" rules by BOTH pattern length AND context set
+        let allBeforeRules = singlePassRules.filter {
+            if case .before = $0.context { return true }
+            return false
+        }
+        
+        // Group by pattern length first
+        let beforeByLength = Dictionary(grouping: allBeforeRules) { rule -> Int in
+            guard case .before(let context) = rule.context else { return 0 }
+            return context.count
+        }
+        
+        // For each length, further group by context set
+        var beforeSubtableGroups: [(length: Int, contextKey: String, rules: [ExpandedContextualRule])] = []
+        
+        for (length, rulesForLength) in beforeByLength {
+            if length == 1 {
+                // For single-element patterns, group by the actual context glyph
+                let grouped = Dictionary(grouping: rulesForLength) { rule -> String in
+                    guard case .before(let context) = rule.context else { return "" }
+                    return context[0] // Group by the single context glyph
+                }
+                
+                for (contextKey, rules) in grouped.sorted(by: { $0.key < $1.key }) {
+                    beforeSubtableGroups.append((length: length, contextKey: contextKey, rules: rules))
+                }
+            } else {
+                // For multi-element patterns, keep them together
+                beforeSubtableGroups.append((length: length, contextKey: "", rules: rulesForLength))
+            }
+        }
+        
+        // Generate a separate subtable for each group
+        for group in beforeSubtableGroups {
+            if subtableNumber > 0 { output += "\n" }
+            
+            if group.length > 1 {
+                output += try generateMultiElementBeforeSubtable(
+                    rules: group.rules,
+                    subtableNumber: subtableNumber
+                )
+            } else {
+                output += try generateContextualSubtable(
+                    rules: group.rules,
+                    contextType: "before",
+                    subtableNumber: subtableNumber
+                )
+            }
+            subtableNumber += 1
+        }
+        
+        // Between and when don't need context grouping
+        let allBetweenRules = singlePassRules.filter {
+            if case .between = $0.context { return true }
+            return false
+        }
+        
+        let allWhenRules = singlePassRules.filter {
+            if case .when = $0.context { return true }
+            return false
+        }
+        
+        if !allBetweenRules.isEmpty {
             if subtableNumber > 0 { output += "\n" }
             output += try generateContextualSubtable(
-                rules: rulesForType,
-                contextType: contextType,
+                rules: allBetweenRules,
+                contextType: "between",
                 subtableNumber: subtableNumber
             )
             subtableNumber += 1
         }
         
-        // Generate decomposed rules - EACH GROUP SEPARATELY
+        if !allWhenRules.isEmpty {
+            if subtableNumber > 0 { output += "\n" }
+            output += try generateContextualSubtable(
+                rules: allWhenRules,
+                contextType: "when",
+                subtableNumber: subtableNumber
+            )
+            subtableNumber += 1
+        }
+        
+        // Generate cleanup subtables grouped by ruleGroupID
+        let decomposedRules = singlePassRules.filter { $0.ruleGroupID != nil }
         var seenGroupIDs = Set<String>()
         var orderedGroupIDs: [String] = []
         for rule in decomposedRules {
@@ -95,41 +204,8 @@ extension ATIFGenerator {
         }
         
         for groupID in orderedGroupIDs.sorted() {
-            let rulesInGroup = decomposedRules.filter { $0.ruleGroupID == groupID }
-            
-            let afterRules = rulesInGroup.filter { if case .after = $0.context { return true }; return false }
-            let beforeRules = rulesInGroup.filter { if case .before = $0.context { return true }; return false }
-            let betweenRules = rulesInGroup.filter { if case .between = $0.context { return true }; return false }
-            let cleanupRulesInGroup = rulesInGroup.filter { if case .cleanup = $0.context { return true }; return false }
-            
-            if !afterRules.isEmpty {
-                if subtableNumber > 0 { output += "\n" }
-                output += try generateContextualSubtable(
-                    rules: afterRules,
-                    contextType: "after",
-                    subtableNumber: subtableNumber
-                )
-                subtableNumber += 1
-            }
-            
-            if !beforeRules.isEmpty {
-                if subtableNumber > 0 { output += "\n" }
-                output += try generateContextualSubtable(
-                    rules: beforeRules,
-                    contextType: "before",
-                    subtableNumber: subtableNumber
-                )
-                subtableNumber += 1
-            }
-            
-            if !betweenRules.isEmpty {
-                if subtableNumber > 0 { output += "\n" }
-                output += try generateContextualSubtable(
-                    rules: betweenRules,
-                    contextType: "between",
-                    subtableNumber: subtableNumber
-                )
-                subtableNumber += 1
+            let cleanupRulesInGroup = decomposedRules.filter {
+                $0.ruleGroupID == groupID && $0.isCleanup
             }
             
             if !cleanupRulesInGroup.isEmpty {
@@ -834,6 +910,179 @@ extension ATIFGenerator {
             let (target, replacement) = rule.substitutions[0]
             output += "    \(target) => \(replacement);\n"
         }
+        
+        output += "};\n"
+        
+        return output
+    }
+    
+    // MARK: - Multi-Element After Context
+
+    private static func generateMultiElementAfterSubtable(
+        rules: [ExpandedContextualRule],
+        subtableNumber: Int
+    ) throws -> String {
+        guard let firstRule = rules.first,
+              case .after(let sampleContext) = firstRule.context,
+              sampleContext.count >= 2 else {
+            throw OT2AATError.generationFailed("Multi-element after requires 2+ elements")
+        }
+        
+        let patternLength = sampleContext.count
+        
+        // Collect glyphs at each position
+        var glyphsByPosition: [[String]] = Array(repeating: [], count: patternLength)
+        var targetGlyphs = Set<String>()
+        
+        for rule in rules {
+            guard case .after(let context) = rule.context else { continue }
+            for (idx, glyph) in context.enumerated() {
+                if !glyphsByPosition[idx].contains(glyph) {
+                    glyphsByPosition[idx].append(glyph)
+                }
+            }
+            targetGlyphs.insert(rule.substitutions[0].target)
+        }
+        
+        var output = ""
+        
+        output += "// Contextual subtable \(subtableNumber) (after \(patternLength)-element)\n"
+        output += "contextual subtable (SmartSwash, WordInitialSwashes) {\n"
+        
+        // Define class for each position
+        for (idx, glyphs) in glyphsByPosition.enumerated() {
+            output += "    class Context\(idx + 1) { " + glyphs.sorted().joined(separator: ", ") + " };\n"
+        }
+        output += "    class TargetGlyphs { " + targetGlyphs.sorted().joined(separator: ", ") + " };\n\n"
+        
+        // Start state
+        output += "    state Start {\n"
+        output += "        Context1: SawContext1;\n"
+        output += "    };\n\n"
+        
+        // Intermediate states
+        for stateIdx in 1..<patternLength {
+            output += "    state SawContext\(stateIdx) {\n"
+            output += "        Context\(stateIdx): SawContext\(stateIdx);\n"
+            output += "        Context\(stateIdx + 1): SawContext\(stateIdx + 1);\n"
+            output += "    };\n\n"
+        }
+        
+        // Final state
+        output += "    state SawContext\(patternLength) {\n"
+        output += "        Context\(patternLength): SawContext\(patternLength);\n"
+        output += "        TargetGlyphs: DoSubstitution;\n"
+        output += "    };\n\n"
+        
+        // Transitions
+        for stateIdx in 1...patternLength {
+            output += "    transition SawContext\(stateIdx) {\n"
+            output += "        change state to SawContext\(stateIdx);\n"
+            output += "    };\n\n"
+        }
+        
+        output += "    transition DoSubstitution {\n"
+        output += "        change state to SawContext\(patternLength);\n"
+        output += "        current glyph substitution: SubstTarget;\n"
+        output += "    };\n\n"
+        
+        output += "    substitution SubstTarget {\n"
+        for rule in rules {
+            guard case .after = rule.context else { continue }
+            let (target, replacement) = rule.substitutions[0]
+            output += "        \(target) => \(replacement);\n"
+        }
+        output += "    };\n"
+        
+        output += "};\n"
+        
+        return output
+    }
+
+    // MARK: - Multi-Element Before Context
+
+    private static func generateMultiElementBeforeSubtable(
+        rules: [ExpandedContextualRule],
+        subtableNumber: Int
+    ) throws -> String {
+        guard let firstRule = rules.first,
+              case .before(let sampleContext) = firstRule.context,
+              sampleContext.count >= 2 else {
+            throw OT2AATError.generationFailed("Multi-element before requires 2+ elements")
+        }
+        
+        let patternLength = sampleContext.count
+        
+        // Collect glyphs at each position
+        var targetGlyphs = Set<String>()
+        var glyphsByPosition: [[String]] = Array(repeating: [], count: patternLength)
+        
+        for rule in rules {
+            guard case .before(let context) = rule.context else { continue }
+            targetGlyphs.insert(rule.substitutions[0].target)
+            for (idx, glyph) in context.enumerated() {
+                if !glyphsByPosition[idx].contains(glyph) {
+                    glyphsByPosition[idx].append(glyph)
+                }
+            }
+        }
+        
+        var output = ""
+        
+        output += "// Contextual subtable \(subtableNumber) (before \(patternLength)-element)\n"
+        output += "contextual subtable (SmartSwash, WordInitialSwashes) {\n"
+        
+        output += "    class TargetGlyphs { " + targetGlyphs.sorted().joined(separator: ", ") + " };\n"
+        for (idx, glyphs) in glyphsByPosition.enumerated() {
+            output += "    class Context\(idx + 1) { " + glyphs.sorted().joined(separator: ", ") + " };\n"
+        }
+        output += "\n"
+        
+        // Start state
+        output += "    state Start {\n"
+        output += "        TargetGlyphs: MarkTarget;\n"
+        output += "    };\n\n"
+        
+        // SawTarget state
+        output += "    state SawTarget {\n"
+        output += "        TargetGlyphs: MarkTarget;\n"
+        output += "        Context1: SawContext1;\n"
+        output += "    };\n\n"
+        
+        // Intermediate states
+        for stateIdx in 1..<patternLength {
+            output += "    state SawContext\(stateIdx) {\n"
+            output += "        TargetGlyphs: MarkTarget;\n"
+            output += "        Context\(stateIdx + 1): SawContext\(stateIdx + 1);\n"
+            output += "    };\n\n"
+        }
+        
+        // Transitions
+        output += "    transition MarkTarget {\n"
+        output += "        change state to SawTarget;\n"
+        output += "        mark glyph;\n"
+        output += "        marked glyph substitution: SubstTarget;\n"
+        output += "    };\n\n"
+        
+        for stateIdx in 1..<patternLength {
+            output += "    transition SawContext\(stateIdx) {\n"
+            output += "        change state to SawContext\(stateIdx);\n"
+            output += "        marked glyph substitution: SubstTarget;\n"
+            output += "    };\n\n"
+        }
+        
+        output += "    transition SawContext\(patternLength) {\n"
+        output += "        change state to Start;\n"
+        output += "        marked glyph substitution: SubstTarget;\n"
+        output += "    };\n\n"
+        
+        output += "    substitution SubstTarget {\n"
+        for rule in rules {
+            guard case .before = rule.context else { continue }
+            let (target, replacement) = rule.substitutions[0]
+            output += "        \(target) => \(replacement);\n"
+        }
+        output += "    };\n"
         
         output += "};\n"
         
