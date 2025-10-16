@@ -925,7 +925,7 @@ extension MIFGenerator {
         output += "// " + String(repeating: "-", count: 79) + "\n\n"
         
         // Header
-        output += "Type\t\t\t\tLigature\n"
+        output += "Type\t\t\t\tLigatureList\n"
         output += "Name\t\t\t\t\(featureName)\n"
         output += "Namecode\t\t\t8\n"
         output += "Setting\t\t\t\t\(featureName)\n"
@@ -935,10 +935,13 @@ extension MIFGenerator {
         output += "Forward\t\t\t\tyes\n"
         output += "Exclusive\t\t\tno\n\n"
         
+        // Start of ligature list
+        output += "List\n"
+        
         // Ligatures
         for rule in rules {
             let components = rule.components.joined(separator: " ")
-            output += "\(rule.target)\t\t\(components)\n"
+            output += "\t\(rule.target)\t\t\(components)\n"
         }
         
         return output

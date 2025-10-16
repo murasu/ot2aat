@@ -187,6 +187,11 @@ class GSUBToAAR:
             return False
         
         content = match.group(1)
+        
+        # First, expand inline classes [glyph1 glyph2 glyph3] to separate elements
+        # Replace brackets with spaces to treat glyphs as separate elements
+        content = content.replace('[', '').replace(']', '')
+        
         elements = content.split()
         
         context = []
@@ -352,8 +357,8 @@ class GSUBToAAR:
         
         return substitutions
     
-    def generate_simple_context(self, ctx: ContextualSubstitution) -> str:
-        """Generate after/before/between context rule"""
+    def generate_simple_context(self, ctx: ContextualSubstitution) -> List[str]:
+        """Generate after/before/between context rule. Returns list of rules."""
         marked_pos = ctx.marked_indices[0]
         pattern_length = len(ctx.context)
         
@@ -362,7 +367,7 @@ class GSUBToAAR:
         substitutions = self.inline_lookup_substitutions(lookup_name)
         
         if not substitutions:
-            return f"# ERROR: No substitutions found in lookup {lookup_name}"
+            return [f"# ERROR: No substitutions found in lookup {lookup_name}"]
         
         target_glyph = ctx.context[marked_pos]
         
@@ -375,7 +380,7 @@ class GSUBToAAR:
             rules = []
             for source, target in substitutions.items():
                 rules.append(f"before {context_after}: {source} => {target}")
-            return '\n'.join(rules)
+            return rules
         
         elif marked_pos == pattern_length - 1 and pattern_length > 1:
             # AFTER context (last position marked)
@@ -384,7 +389,7 @@ class GSUBToAAR:
             rules = []
             for source, target in substitutions.items():
                 rules.append(f"after {context_before}: {source} => {target}")
-            return '\n'.join(rules)
+            return rules
         
         elif 0 < marked_pos < pattern_length - 1:
             # BETWEEN context (middle position marked)
@@ -394,13 +399,13 @@ class GSUBToAAR:
             rules = []
             for source, target in substitutions.items():
                 rules.append(f"between {context_before} and {context_after}: {source} => {target}")
-            return '\n'.join(rules)
+            return rules
         
         else:
-            return f"# ERROR: Cannot determine context type for pattern: {' '.join(ctx.context)}"
+            return [f"# ERROR: Cannot determine context type for pattern: {' '.join(ctx.context)}"]
     
     def generate_when_context(self, ctx: ContextualSubstitution) -> str:
-        """Generate when context rule with multiple substitutions"""
+        """Generate when context rule with multiple substitutions - single line"""
         pattern = ' '.join(ctx.context)
         
         # Check pattern length
@@ -433,13 +438,9 @@ class GSUBToAAR:
         if not all_subs:
             return f"# ERROR: No valid substitutions for pattern: {pattern}"
         
-        # Format the rule
-        if len(all_subs) == 1:
-            return f"when {pattern}: {all_subs[0]}"
-        else:
-            # Multiple substitutions - format nicely
-            subs_str = ',\n    '.join(all_subs)
-            return f"when {pattern}:\n    {subs_str}"
+        # Format everything on a single line with comma separation
+        subs_str = ', '.join(all_subs)
+        return f"when {pattern}: {subs_str}"
     
     def generate_contextual_section(self) -> str:
         """Generate the @contextual section of .aar output"""
@@ -461,26 +462,28 @@ class GSUBToAAR:
                 continue
             
             # Check for lookupflag issues
+            has_lookupflag = False
             for lookup_name in ctx.lookup_refs.values():
                 if lookup_name in self.lookups:
                     # Check if any line has lookupflag
                     for line in self.lookups[lookup_name]:
                         if 'lookupflag' in line.lower():
-                            output.append(f"    # NOTE: Lookup {lookup_name} has lookupflag - may need manual adjustment")
+                            # Extract the filtering set if present for more info
+                            if 'UseMarkFilteringSet' in line:
+                                output.append(f"    # NOTE: Lookup {lookup_name} has UseMarkFilteringSet - AAT uses exact sequential matching")
+                            else:
+                                output.append(f"    # NOTE: Lookup {lookup_name} has lookupflag - behavior may differ in AAT")
                             break
             
             if num_marked == 1:
-                # Simple context
-                rule = self.generate_simple_context(ctx)
-                output.append(f"    {rule}")
+                # Simple context - returns list of rules
+                rules = self.generate_simple_context(ctx)
+                for rule in rules:
+                    output.append(f"    {rule}")
             else:
-                # When context with multiple substitutions
+                # When context with multiple substitutions - returns single line
                 rule = self.generate_when_context(ctx)
-                # Indent properly
-                for line in rule.split('\n'):
-                    output.append(f"    {line}")
-            
-            output.append("")
+                output.append(f"    {rule}")
         
         output.append("}")
         output.append("")
