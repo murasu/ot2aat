@@ -2,6 +2,22 @@ import Foundation
 
 extension MIFGenerator {
     /// Generate MIF for contextual substitution
+    
+    // MARK: - Helper: Analyze Glyph Overlap
+    private static func analyzeGlyphSets(
+        targets: Set<String>,
+        contexts: Set<String>
+    ) -> (targetOnly: Set<String>, contextOnly: Set<String>, both: Set<String>, hasOverlap: Bool) {
+        
+        let both = targets.intersection(contexts)
+        let targetOnly = targets.subtracting(contexts)
+        let contextOnly = contexts.subtracting(targets)
+        
+        return (targetOnly, contextOnly, both, !both.isEmpty)
+    }
+    
+    // MARK: - Generate Contextual
+    
     static func generateContextual(
         rules: [ContextualRule],
         classes: [GlyphClass],
@@ -204,8 +220,6 @@ extension MIFGenerator {
     // MARK: - After Context
     
     private static func generateAfterTable(rules: [ExpandedContextualRule]) throws -> String {
-        var output = ""
-        
         var contextGlyphs = Set<String>()
         var targetGlyphs = Set<String>()
         
@@ -215,8 +229,37 @@ extension MIFGenerator {
             targetGlyphs.insert(rule.substitutions[0].target)
         }
         
-        output += "ContextGlyphs\t\t" + contextGlyphs.sorted().joined(separator: " ") + "\n"
-        output += "TargetGlyphs\t\t" + targetGlyphs.sorted().joined(separator: " ") + "\n\n"
+        // Analyze overlap
+        let (tgtOnly, ctxOnly, both, hasOverlap) = analyzeGlyphSets(
+            targets: targetGlyphs,
+            contexts: contextGlyphs
+        )
+        
+        if hasOverlap {
+            return try generateAfterTableWithOverlap(
+                targetOnly: tgtOnly,
+                contextOnly: ctxOnly,
+                both: both,
+                rules: rules
+            )
+        } else {
+            return try generateAfterTableSimple(
+                targets: targetGlyphs,
+                contexts: contextGlyphs,
+                rules: rules
+            )
+        }
+    }
+    
+    private static func generateAfterTableSimple(
+        targets: Set<String>,
+        contexts: Set<String>,
+        rules: [ExpandedContextualRule]
+    ) throws -> String {
+        var output = ""
+        
+        output += "ContextGlyphs\t\t" + contexts.sorted().joined(separator: " ") + "\n"
+        output += "TargetGlyphs\t\t" + targets.sorted().joined(separator: " ") + "\n\n"
         
         output += "\t\t\t\tEOT\tOOB\tDEL\tEOL\tContextGlyphs\tTargetGlyphs\n"
         output += "StartText\t\t1\t1\t1\t1\t2\t\t\t\t1\n"
@@ -226,7 +269,43 @@ extension MIFGenerator {
         output += "\tGoTo\t\t\tMark?\tAdvance?\tSubstMark\tSubstCurrent\n"
         output += "1\tStartText\t\tno\t\tyes\t\t\tnone\t\tnone\n"
         output += "2\tSawContext\t\tno\t\tyes\t\t\tnone\t\tnone\n"
-        output += "3\tSawContext\t\tno\t\tyes\t\t\tnone\tdoSubst\n\n"
+        output += "3\tSawContext\t\tno\t\tyes\t\t\tnone\t\tdoSubst\n\n"
+        
+        output += "doSubst\n"
+        for rule in rules {
+            guard case .after = rule.context else { continue }
+            let (target, replacement) = rule.substitutions[0]
+            output += "\t\(target)\t\t\(replacement)\n"
+        }
+        
+        return output
+    }
+    
+    private static func generateAfterTableWithOverlap(
+        targetOnly: Set<String>,
+        contextOnly: Set<String>,
+        both: Set<String>,
+        rules: [ExpandedContextualRule]
+    ) throws -> String {
+        var output = ""
+        
+        // Three classes
+        output += "Context\t\t\t" + contextOnly.sorted().joined(separator: " ") + "\n"
+        output += "Target\t\t\t" + targetOnly.sorted().joined(separator: " ") + "\n"
+        output += "TrgtAndCntx\t\t" + both.sorted().joined(separator: " ") + "\n\n"
+        
+        // State array with 3 classes
+        output += "\t\t\t\tEOT\tOOB\tDEL\tEOL\tContext\tTarget\tTrgtAndCntx\n"
+        output += "StartText\t\t1\t1\t1\t1\t2\t\t1\t\t2\n"
+        output += "StartLine\t\t1\t1\t1\t1\t2\t\t1\t\t2\n"
+        output += "SawContext\t\t1\t1\t2\t1\t2\t\t3\t\t4\n\n"
+        
+        // Four transitions
+        output += "\tGoTo\t\t\tMark?\tAdvance?\tSubstMark\tSubstCurrent\n"
+        output += "1\tStartText\t\tno\t\tyes\t\t\tnone\t\tnone\n"
+        output += "2\tSawContext\t\tno\t\tyes\t\t\tnone\t\tnone\n"
+        output += "3\tSawContext\t\tno\t\tyes\t\t\tnone\t\tdoSubst\n"
+        output += "4\tSawContext\t\tno\t\tyes\t\t\tnone\t\tdoSubst\n\n"
         
         output += "doSubst\n"
         for rule in rules {
@@ -241,8 +320,6 @@ extension MIFGenerator {
     // MARK: - Before Context
     
     private static func generateBeforeTable(rules: [ExpandedContextualRule]) throws -> String {
-        var output = ""
-        
         var targetGlyphs = Set<String>()
         var contextGlyphs = Set<String>()
         
@@ -252,8 +329,37 @@ extension MIFGenerator {
             targetGlyphs.insert(rule.substitutions[0].target)
         }
         
-        output += "TargetGlyphs\t\t" + targetGlyphs.sorted().joined(separator: " ") + "\n"
-        output += "ContextGlyphs\t\t" + contextGlyphs.sorted().joined(separator: " ") + "\n\n"
+        // Analyze overlap
+        let (tgtOnly, ctxOnly, both, hasOverlap) = analyzeGlyphSets(
+            targets: targetGlyphs,
+            contexts: contextGlyphs
+        )
+        
+        if hasOverlap {
+            return try generateBeforeTableWithOverlap(
+                targetOnly: tgtOnly,
+                contextOnly: ctxOnly,
+                both: both,
+                rules: rules
+            )
+        } else {
+            return try generateBeforeTableSimple(
+                targets: targetGlyphs,
+                contexts: contextGlyphs,
+                rules: rules
+            )
+        }
+    }
+    
+    private static func generateBeforeTableSimple(
+        targets: Set<String>,
+        contexts: Set<String>,
+        rules: [ExpandedContextualRule]
+    ) throws -> String {
+        var output = ""
+        
+        output += "TargetGlyphs\t\t" + targets.sorted().joined(separator: " ") + "\n"
+        output += "ContextGlyphs\t\t" + contexts.sorted().joined(separator: " ") + "\n\n"
         
         output += "\t\t\t\tEOT\tOOB\tDEL\tEOL\tTargetGlyphs\tContextGlyphs\n"
         output += "StartText\t\t1\t1\t1\t1\t2\t\t\t\t1\n"
@@ -275,11 +381,45 @@ extension MIFGenerator {
         return output
     }
     
+    private static func generateBeforeTableWithOverlap(
+        targetOnly: Set<String>,
+        contextOnly: Set<String>,
+        both: Set<String>,
+        rules: [ExpandedContextualRule]
+    ) throws -> String {
+        var output = ""
+        
+        // Three classes
+        output += "Target\t\t\t" + targetOnly.sorted().joined(separator: " ") + "\n"
+        output += "Context\t\t\t" + contextOnly.sorted().joined(separator: " ") + "\n"
+        output += "TrgtAndCntx\t\t" + both.sorted().joined(separator: " ") + "\n\n"
+        
+        // State array with 3 classes
+        output += "\t\t\t\tEOT\tOOB\tDEL\tEOL\tTarget\tContext\tTrgtAndCntx\n"
+        output += "StartText\t\t1\t1\t1\t1\t2\t\t1\t\t2\n"
+        output += "StartLine\t\t1\t1\t1\t1\t2\t\t1\t\t2\n"
+        output += "SawTarget\t\t1\t1\t2\t1\t2\t\t3\t\t4\n\n"
+        
+        // Four transitions
+        output += "\tGoTo\t\t\tMark?\tAdvance?\tSubstMark\tSubstCurrent\n"
+        output += "1\tStartText\t\tno\t\tyes\t\t\tnone\t\tnone\n"
+        output += "2\tSawTarget\t\tyes\t\tyes\t\t\tdoSubst\t\tnone\n"
+        output += "3\tStartText\t\tno\t\tyes\t\t\tdoSubst\t\tnone\n"
+        output += "4\tSawTarget\t\tyes\t\tyes\t\t\tdoSubst\t\tnone\n\n"
+        
+        output += "doSubst\n"
+        for rule in rules {
+            guard case .before = rule.context else { continue }
+            let (target, replacement) = rule.substitutions[0]
+            output += "\t\(target)\t\t\(replacement)\n"
+        }
+        
+        return output
+    }
+    
     // MARK: - Between Context
     
     private static func generateBetweenTable(rules: [ExpandedContextualRule]) throws -> String {
-        var output = ""
-        
         var firstContextGlyphs = Set<String>()
         var targetGlyphs = Set<String>()
         var secondContextGlyphs = Set<String>()
@@ -291,9 +431,42 @@ extension MIFGenerator {
             targetGlyphs.insert(rule.substitutions[0].target)
         }
         
-        output += "FirstContext\t\t" + firstContextGlyphs.sorted().joined(separator: " ") + "\n"
-        output += "TargetGlyphs\t\t" + targetGlyphs.sorted().joined(separator: " ") + "\n"
-        output += "SecondContext\t\t" + secondContextGlyphs.sorted().joined(separator: " ") + "\n\n"
+        // For between, we need to check overlap with BOTH context sets
+        let allContextGlyphs = firstContextGlyphs.union(secondContextGlyphs)
+        let (tgtOnly, _, both, hasOverlap) = analyzeGlyphSets(  // Use _ for ctxOnly
+            targets: targetGlyphs,
+            contexts: allContextGlyphs
+        )
+        
+        if hasOverlap {
+            return try generateBetweenTableWithOverlap(
+                firstContext: firstContextGlyphs,
+                targetOnly: tgtOnly,
+                secondContext: secondContextGlyphs,
+                both: both,
+                rules: rules
+            )
+        } else {
+            return try generateBetweenTableSimple(
+                firstContext: firstContextGlyphs,
+                targets: targetGlyphs,
+                secondContext: secondContextGlyphs,
+                rules: rules
+            )
+        }
+    }
+    
+    private static func generateBetweenTableSimple(
+        firstContext: Set<String>,
+        targets: Set<String>,
+        secondContext: Set<String>,
+        rules: [ExpandedContextualRule]
+    ) throws -> String {
+        var output = ""
+        
+        output += "FirstContext\t\t" + firstContext.sorted().joined(separator: " ") + "\n"
+        output += "TargetGlyphs\t\t" + targets.sorted().joined(separator: " ") + "\n"
+        output += "SecondContext\t\t" + secondContext.sorted().joined(separator: " ") + "\n\n"
         
         output += "\t\t\t\tEOT\tOOB\tDEL\tEOL\tFirstContext\tTargetGlyphs\tSecondContext\n"
         output += "StartText\t\t1\t1\t1\t1\t2\t\t\t\t1\t\t\t\t1\n"
@@ -306,6 +479,50 @@ extension MIFGenerator {
         output += "2\tSawFirst\t\tno\t\tyes\t\t\tnone\t\tnone\n"
         output += "3\tSawTarget\t\tyes\t\tyes\t\t\tdoSubst\t\tnone\n"
         output += "4\tStartText\t\tno\t\tyes\t\t\tdoSubst\t\tnone\n\n"
+        
+        output += "doSubst\n"
+        for rule in rules {
+            guard case .between = rule.context else { continue }
+            let (target, replacement) = rule.substitutions[0]
+            output += "\t\(target)\t\t\(replacement)\n"
+        }
+        
+        return output
+    }
+    
+    private static func generateBetweenTableWithOverlap(
+        firstContext: Set<String>,
+        targetOnly: Set<String>,
+        secondContext: Set<String>,
+        both: Set<String>,
+        rules: [ExpandedContextualRule]
+    ) throws -> String {
+        var output = ""
+        
+        // Separate pure contexts from overlapping glyphs
+        let firstOnly = firstContext.subtracting(targetOnly).subtracting(both)
+        let secondOnly = secondContext.subtracting(targetOnly).subtracting(both)
+        
+        // Build classes carefully
+        output += "FirstContext\t\t" + firstOnly.sorted().joined(separator: " ") + "\n"
+        output += "Target\t\t\t" + targetOnly.sorted().joined(separator: " ") + "\n"
+        output += "SecondContext\t\t" + secondOnly.sorted().joined(separator: " ") + "\n"
+        output += "TrgtAndCntx\t\t" + both.sorted().joined(separator: " ") + "\n\n"
+        
+        // State array - this gets complex with 4 classes
+        output += "\t\t\t\tEOT\tOOB\tDEL\tEOL\tFirstContext\tTarget\tSecondContext\tTrgtAndCntx\n"
+        output += "StartText\t\t1\t1\t1\t1\t2\t\t\t\t1\t\t1\t\t\t\t2\n"
+        output += "StartLine\t\t1\t1\t1\t1\t2\t\t\t\t1\t\t1\t\t\t\t2\n"
+        output += "SawFirst\t\t1\t1\t2\t1\t2\t\t\t\t3\t\t1\t\t\t\t3\n"
+        output += "SawTarget\t\t1\t1\t3\t1\t1\t\t\t\t3\t\t4\t\t\t\t5\n\n"
+        
+        // Five transitions to handle all cases
+        output += "\tGoTo\t\t\tMark?\tAdvance?\tSubstMark\tSubstCurrent\n"
+        output += "1\tStartText\t\tno\t\tyes\t\t\tnone\t\tnone\n"
+        output += "2\tSawFirst\t\tno\t\tyes\t\t\tnone\t\tnone\n"
+        output += "3\tSawTarget\t\tyes\t\tyes\t\t\tdoSubst\t\tnone\n"
+        output += "4\tStartText\t\tno\t\tyes\t\t\tdoSubst\t\tnone\n"
+        output += "5\tSawTarget\t\tyes\t\tyes\t\t\tdoSubst\t\tnone\n\n"
         
         output += "doSubst\n"
         for rule in rules {
