@@ -154,7 +154,7 @@ extension RuleParser {
     
     /// Parse a reorder rule line
     /// Format: element1 element2 => element1' element2'
-    private static func parseReorderRule(
+    internal static func parseReorderRule(
         _ line: String,
         lineNumber: Int,
         registry: GlyphClassRegistry
@@ -357,7 +357,7 @@ extension RuleParser {
     }
     
     /// Parse a single contextual rule line
-    private static func parseContextualRule(
+    internal static func parseContextualRule(
         _ line: String,
         lineNumber: Int,
         registry: GlyphClassRegistry

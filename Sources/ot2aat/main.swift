@@ -6,10 +6,12 @@ struct OT2AAT: ParsableCommand {
         abstract: "Convert OpenType layout rules to Apple Advanced Typography format",
         version: "1.0.0",
         subcommands: [
+            GsubCommand.self,          // NEW: Unified GSUB command
+            MarkPosCommand.self,        // Unified GPOS command
+            // Legacy commands (can deprecate later):
             One2ManyCommand.self,
             ReorderCommand.self,
-            ContextSubCommand.self,
-            MarkPosCommand.self  // Unified mark positioning command
+            ContextSubCommand.self
         ]
     )
 }

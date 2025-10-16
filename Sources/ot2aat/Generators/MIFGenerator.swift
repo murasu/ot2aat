@@ -799,3 +799,148 @@ extension MIFGenerator {
         return output
     }
 }
+
+// MARK: - MIFGenerator Extension
+
+extension MIFGenerator {
+    /// Generate unified MIF for all GSUB types
+    static func generateGsub(
+        rules: GsubRules,
+        featureName: String,
+        selectorNumber: Int
+    ) throws -> String {
+        var output = ""
+        var tableNumber = 0
+        
+        output += "// " + String(repeating: "=", count: 79) + "\n"
+        output += "//\n"
+        output += "//  Generated MIF for GSUB (all substitution types)\n"
+        output += "//  Feature: \(featureName), Selector: \(selectorNumber)\n"
+        output += "//  Generated: \(Date())\n"
+        output += "//\n"
+        output += "// " + String(repeating: "=", count: 79) + "\n\n"
+        
+        // Generate simple substitutions (noncontextual)
+        if !rules.simpleSubstitutions.isEmpty {
+            output += try generateSimpleSubstitutionTable(
+                rules: rules.simpleSubstitutions,
+                featureName: featureName,
+                selectorNumber: selectorNumber,
+                tableNumber: tableNumber
+            )
+            tableNumber += 1
+            output += "\n"
+        }
+        
+        // Generate ligatures
+        if !rules.ligatures.isEmpty {
+            output += try generateLigatureTable(
+                rules: rules.ligatures,
+                featureName: featureName,
+                selectorNumber: selectorNumber,
+                tableNumber: tableNumber
+            )
+            tableNumber += 1
+            output += "\n"
+        }
+        
+        // Generate one-to-many (insertion + contextual pair)
+        if !rules.one2many.isEmpty {
+            output += try generateOne2Many(
+                rules: rules.one2many,
+                featureName: featureName,
+                selectorNumber: selectorNumber
+            )
+            // This generates 2 tables internally
+            output += "\n"
+        }
+        
+        // Generate contextual substitution
+        if !rules.contextual.isEmpty {
+            output += try generateContextual(
+                rules: rules.contextual,
+                classes: rules.classes,
+                featureName: featureName,
+                selectorNumber: selectorNumber
+            )
+            output += "\n"
+        }
+        
+        // Generate reorder
+        if !rules.reorder.isEmpty {
+            output += try generateReorder(
+                rules: rules.reorder,
+                classes: rules.classes,
+                featureName: featureName,
+                selectorNumber: selectorNumber
+            )
+        }
+        
+        return output
+    }
+    
+    /// Generate MIF for simple substitutions (Type 1 - Noncontextual)
+    private static func generateSimpleSubstitutionTable(
+        rules: [SimpleSubstitution],
+        featureName: String,
+        selectorNumber: Int,
+        tableNumber: Int
+    ) throws -> String {
+        var output = ""
+        
+        output += "// " + String(repeating: "-", count: 79) + "\n"
+        output += "// TABLE \(tableNumber): Simple substitutions (Type 1)\n"
+        output += "// " + String(repeating: "-", count: 79) + "\n\n"
+        
+        // Header
+        output += "Type\t\t\t\tNoncontextual\n"
+        output += "Name\t\t\t\t\(featureName)\n"
+        output += "Namecode\t\t\t8\n"
+        output += "Setting\t\t\t\t\(featureName)\n"
+        output += "Settingcode\t\t\t\(selectorNumber)\n"
+        output += "Default\t\t\t\tyes\n"
+        output += "Orientation\t\t\tHV\n"
+        output += "Forward\t\t\t\tyes\n"
+        output += "Exclusive\t\t\tno\n\n"
+        
+        // Substitutions
+        for rule in rules {
+            output += "\(rule.source)\t\t\(rule.target)\n"
+        }
+        
+        return output
+    }
+    
+    /// Generate MIF for ligatures (Type 4)
+    private static func generateLigatureTable(
+        rules: [LigatureRule],
+        featureName: String,
+        selectorNumber: Int,
+        tableNumber: Int
+    ) throws -> String {
+        var output = ""
+        
+        output += "// " + String(repeating: "-", count: 79) + "\n"
+        output += "// TABLE \(tableNumber): Ligatures (Type 4)\n"
+        output += "// " + String(repeating: "-", count: 79) + "\n\n"
+        
+        // Header
+        output += "Type\t\t\t\tLigature\n"
+        output += "Name\t\t\t\t\(featureName)\n"
+        output += "Namecode\t\t\t8\n"
+        output += "Setting\t\t\t\t\(featureName)\n"
+        output += "Settingcode\t\t\t\(selectorNumber)\n"
+        output += "Default\t\t\t\tyes\n"
+        output += "Orientation\t\t\tHV\n"
+        output += "Forward\t\t\t\tyes\n"
+        output += "Exclusive\t\t\tno\n\n"
+        
+        // Ligatures
+        for rule in rules {
+            let components = rule.components.joined(separator: " ")
+            output += "\(rule.target)\t\t\(components)\n"
+        }
+        
+        return output
+    }
+}

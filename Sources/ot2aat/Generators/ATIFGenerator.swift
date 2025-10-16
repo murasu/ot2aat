@@ -769,3 +769,121 @@ extension ATIFGenerator {
 }
 
 
+// MARK: - ATIFGenerator Extension
+
+extension ATIFGenerator {
+    /// Generate unified ATIF for all GSUB types
+    static func generateGsub(
+        rules: GsubRules,
+        featureName: String,
+        selectorNumber: Int
+    ) throws -> String {
+        var output = ""
+        var subtableNumber = 0
+        
+        output += "// " + String(repeating: "=", count: 79) + "\n"
+        output += "//\n"
+        output += "//  Generated ATIF for GSUB (all substitution types)\n"
+        output += "//  Feature: \(featureName), Selector: \(selectorNumber)\n"
+        output += "//  Generated: \(Date())\n"
+        output += "//\n"
+        output += "// " + String(repeating: "=", count: 79) + "\n\n"
+        
+        // Feature definition
+        output += "feature (SmartSwash, \"\(featureName)\") {\n"
+        output += "    selector(WordInitialSwashes, \"\(featureName)\");\n"
+        output += "};\n\n"
+        
+        // Generate simple substitutions (noncontextual)
+        if !rules.simpleSubstitutions.isEmpty {
+            output += try generateSimpleSubstitutionSubtable(
+                rules: rules.simpleSubstitutions,
+                subtableNumber: subtableNumber
+            )
+            subtableNumber += 1
+            output += "\n"
+        }
+        
+        // Generate ligatures
+        if !rules.ligatures.isEmpty {
+            output += try generateLigatureSubtable(
+                rules: rules.ligatures,
+                subtableNumber: subtableNumber
+            )
+            subtableNumber += 1
+            output += "\n"
+        }
+        
+        // Generate one-to-many
+        if !rules.one2many.isEmpty {
+            output += try generateOne2Many(
+                rules: rules.one2many,
+                featureName: featureName,
+                selectorNumber: selectorNumber
+            )
+            output += "\n"
+        }
+        
+        // Generate contextual
+        if !rules.contextual.isEmpty {
+            output += try generateContextual(
+                rules: rules.contextual,
+                classes: rules.classes,
+                featureName: featureName,
+                selectorNumber: selectorNumber
+            )
+            output += "\n"
+        }
+        
+        // Generate reorder
+        if !rules.reorder.isEmpty {
+            output += try generateReorder(
+                rules: rules.reorder,
+                classes: rules.classes,
+                featureName: featureName,
+                selectorNumber: selectorNumber
+            )
+        }
+        
+        return output
+    }
+    
+    /// Generate ATIF for simple substitutions
+    private static func generateSimpleSubstitutionSubtable(
+        rules: [SimpleSubstitution],
+        subtableNumber: Int
+    ) throws -> String {
+        var output = ""
+        
+        output += "// Noncontextual subtable \(subtableNumber) (simple substitutions)\n"
+        output += "noncontextual subtable (SmartSwash, WordInitialSwashes) {\n"
+        
+        for rule in rules {
+            output += "    \(rule.source) => \(rule.target);\n"
+        }
+        
+        output += "};\n"
+        
+        return output
+    }
+    
+    /// Generate ATIF for ligatures
+    private static func generateLigatureSubtable(
+        rules: [LigatureRule],
+        subtableNumber: Int
+    ) throws -> String {
+        var output = ""
+        
+        output += "// Ligature subtable \(subtableNumber)\n"
+        output += "ligature subtable (SmartSwash, WordInitialSwashes) {\n"
+        
+        for rule in rules {
+            let components = rule.components.joined(separator: " + ")
+            output += "    \(rule.target) := \(components);\n"
+        }
+        
+        output += "};\n"
+        
+        return output
+    }
+}

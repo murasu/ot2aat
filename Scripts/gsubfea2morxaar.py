@@ -46,7 +46,7 @@ class ContextualSubstitution:
                  substitutions: Dict[int, str], lookup_refs: Dict[int, str]):
         self.context = context  # Full context pattern
         self.marked_indices = marked_indices  # Which positions have '
-        self.substitutions = substitutions  # index -> replacement
+        self.substitutions = substitutions  # index -> replacement (unused now, will be inlined)
         self.lookup_refs = lookup_refs  # index -> lookup name to inline
 
 
@@ -61,7 +61,7 @@ class GSUBToAAR:
         self.contextual_subs: List[ContextualSubstitution] = []
         
         # Track lookups for inlining
-        self.lookups: Dict[str, List] = {}
+        self.lookups: Dict[str, List[str]] = {}
         
         # Track classes
         self.global_classes: Dict[str, List[str]] = {}
@@ -277,7 +277,7 @@ class GSUBToAAR:
                 elif sub_type == 'contextual':
                     self.parse_contextual_substitution(current_line)
                 
-                # Store in lookup for potential inlining
+                # Store raw line in lookup for potential inlining
                 lookup_contents.append(current_line)
             
             lines_consumed += 1
@@ -327,12 +327,172 @@ class GSUBToAAR:
         print(f"  Multiple substitutions: {len(self.multiple_subs)}", file=sys.stderr)
         print(f"  Contextual substitutions: {len(self.contextual_subs)}", file=sys.stderr)
     
+    def inline_lookup_substitutions(self, lookup_name: str) -> Dict[str, str]:
+        """
+        Extract all single substitutions from a lookup.
+        Returns dict of {source: target}.
+        If same source appears multiple times, last one wins.
+        """
+        if lookup_name not in self.lookups:
+            print(f"ERROR: Lookup '{lookup_name}' not found!", file=sys.stderr)
+            return {}
+        
+        substitutions = {}
+        lookup_rules = self.lookups[lookup_name]
+        
+        for rule in lookup_rules:
+            # Only handle simple substitutions for now
+            pattern = r'sub\s+(\S+)\s+by\s+(\S+);'
+            match = re.match(pattern, rule.strip())
+            if match:
+                source = match.group(1)
+                target = match.group(2)
+                # Last one wins
+                substitutions[source] = target
+        
+        return substitutions
+    
+    def generate_simple_context(self, ctx: ContextualSubstitution) -> str:
+        """Generate after/before/between context rule"""
+        marked_pos = ctx.marked_indices[0]
+        pattern_length = len(ctx.context)
+        
+        # Get the target and replacement from lookup
+        lookup_name = ctx.lookup_refs[marked_pos]
+        substitutions = self.inline_lookup_substitutions(lookup_name)
+        
+        if not substitutions:
+            return f"# ERROR: No substitutions found in lookup {lookup_name}"
+        
+        target_glyph = ctx.context[marked_pos]
+        
+        # Determine context type
+        if marked_pos == 0 and pattern_length > 1:
+            # BEFORE context (first position marked)
+            context_after = ' '.join(ctx.context[1:])
+            
+            # Generate rules for each substitution
+            rules = []
+            for source, target in substitutions.items():
+                rules.append(f"before {context_after}: {source} => {target}")
+            return '\n'.join(rules)
+        
+        elif marked_pos == pattern_length - 1 and pattern_length > 1:
+            # AFTER context (last position marked)
+            context_before = ' '.join(ctx.context[:-1])
+            
+            rules = []
+            for source, target in substitutions.items():
+                rules.append(f"after {context_before}: {source} => {target}")
+            return '\n'.join(rules)
+        
+        elif 0 < marked_pos < pattern_length - 1:
+            # BETWEEN context (middle position marked)
+            context_before = ' '.join(ctx.context[:marked_pos])
+            context_after = ' '.join(ctx.context[marked_pos+1:])
+            
+            rules = []
+            for source, target in substitutions.items():
+                rules.append(f"between {context_before} and {context_after}: {source} => {target}")
+            return '\n'.join(rules)
+        
+        else:
+            return f"# ERROR: Cannot determine context type for pattern: {' '.join(ctx.context)}"
+    
+    def generate_when_context(self, ctx: ContextualSubstitution) -> str:
+        """Generate when context rule with multiple substitutions"""
+        pattern = ' '.join(ctx.context)
+        
+        # Check pattern length
+        if len(ctx.context) > 10:
+            return f"# ERROR: Pattern too long ({len(ctx.context)} elements, max 10): {pattern}"
+        
+        # Collect all substitutions from all marked positions
+        all_subs = []
+        
+        for marked_pos in ctx.marked_indices:
+            if marked_pos not in ctx.lookup_refs:
+                continue
+            
+            lookup_name = ctx.lookup_refs[marked_pos]
+            substitutions = self.inline_lookup_substitutions(lookup_name)
+            
+            if not substitutions:
+                print(f"WARNING: No substitutions in lookup {lookup_name}", file=sys.stderr)
+                continue
+            
+            # Get the target glyph from the pattern
+            target_glyph = ctx.context[marked_pos]
+            
+            # For each substitution in the lookup
+            for source, replacement in substitutions.items():
+                # Only include if source matches the pattern element
+                if source == target_glyph or target_glyph.startswith('@'):
+                    all_subs.append(f"{source} => {replacement}")
+        
+        if not all_subs:
+            return f"# ERROR: No valid substitutions for pattern: {pattern}"
+        
+        # Format the rule
+        if len(all_subs) == 1:
+            return f"when {pattern}: {all_subs[0]}"
+        else:
+            # Multiple substitutions - format nicely
+            subs_str = ',\n    '.join(all_subs)
+            return f"when {pattern}:\n    {subs_str}"
+    
+    def generate_contextual_section(self) -> str:
+        """Generate the @contextual section of .aar output"""
+        if not self.contextual_subs:
+            return ""
+        
+        output = []
+        output.append("# " + "-" * 76)
+        output.append("# CONTEXTUAL SUBSTITUTIONS (Type 6)")
+        output.append("# " + "-" * 76)
+        output.append("")
+        output.append("@contextual {")
+        
+        for ctx in self.contextual_subs:
+            num_marked = len(ctx.marked_indices)
+            
+            if num_marked == 0:
+                output.append("    # ERROR: No marked positions in pattern")
+                continue
+            
+            # Check for lookupflag issues
+            for lookup_name in ctx.lookup_refs.values():
+                if lookup_name in self.lookups:
+                    # Check if any line has lookupflag
+                    for line in self.lookups[lookup_name]:
+                        if 'lookupflag' in line.lower():
+                            output.append(f"    # NOTE: Lookup {lookup_name} has lookupflag - may need manual adjustment")
+                            break
+            
+            if num_marked == 1:
+                # Simple context
+                rule = self.generate_simple_context(ctx)
+                output.append(f"    {rule}")
+            else:
+                # When context with multiple substitutions
+                rule = self.generate_when_context(ctx)
+                # Indent properly
+                for line in rule.split('\n'):
+                    output.append(f"    {line}")
+            
+            output.append("")
+        
+        output.append("}")
+        output.append("")
+        
+        return '\n'.join(output)
+    
     def generate_output(self) -> str:
-        """Generate .aar format output"""
+        """Generate unified .aar format output"""
         output = []
         
         output.append("# " + "=" * 76)
-        output.append("# Converted from OpenType GSUB format to .aar format")
+        output.append("# Converted from OpenType GSUB format to unified .aar format")
         output.append("# " + "=" * 76)
         output.append("")
         
@@ -349,15 +509,13 @@ class GSUBToAAR:
             
             output.append("")
         
-        # Simple substitutions → noncontextual
+        # Simple substitutions → @simple section
         if self.single_subs:
             output.append("# " + "-" * 76)
             output.append("# SIMPLE SUBSTITUTIONS (Type 1)")
             output.append("# " + "-" * 76)
             output.append("")
-            output.append("noncontextual simple_subs {")
-            output.append("    feature: always")
-            output.append("")
+            output.append("@simple {")
             
             for sub in self.single_subs:
                 output.append(f"    {sub.source} -> {sub.target}")
@@ -365,15 +523,13 @@ class GSUBToAAR:
             output.append("}")
             output.append("")
         
-        # Ligatures
+        # Ligatures → @ligature section
         if self.ligatures:
             output.append("# " + "-" * 76)
             output.append("# LIGATURES (Type 4)")
             output.append("# " + "-" * 76)
             output.append("")
-            output.append("ligature basic_ligs {")
-            output.append("    feature: ligatures.common_on")
-            output.append("")
+            output.append("@ligature {")
             
             for lig in self.ligatures:
                 components = ' + '.join(lig.components)
@@ -382,38 +538,25 @@ class GSUBToAAR:
             output.append("}")
             output.append("")
         
-        # Multiple substitutions → .rules format
+        # Multiple substitutions → @one2many section
         if self.multiple_subs:
             output.append("# " + "-" * 76)
-            output.append("# MULTIPLE SUBSTITUTIONS (Type 2) - .rules format")
-            output.append("# " + "-" * 76)
-            output.append("# Format: source > target1 target2 target3")
+            output.append("# MULTIPLE SUBSTITUTIONS (Type 2)")
             output.append("# " + "-" * 76)
             output.append("")
+            output.append("@one2many {")
             
             for mult in self.multiple_subs:
                 targets = ' '.join(mult.targets)
-                output.append(f"{mult.source} > {targets}")
+                output.append(f"    {mult.source} > {targets}")
             
+            output.append("}")
             output.append("")
         
         # Contextual substitutions
-        if self.contextual_subs:
-            output.append("# " + "-" * 76)
-            output.append("# CONTEXTUAL SUBSTITUTIONS (Type 6)")
-            output.append("# " + "-" * 76)
-            output.append("# Format: when pattern: target => replacement")
-            output.append("# " + "-" * 76)
-            output.append("")
-            
-            for ctx in self.contextual_subs:
-                # Simple format for now
-                pattern = ' '.join(ctx.context)
-                output.append(f"# Context pattern: {pattern}")
-                output.append(f"# Marked positions: {ctx.marked_indices}")
-                if ctx.lookup_refs:
-                    output.append(f"# Lookup references: {ctx.lookup_refs}")
-                output.append("")
+        contextual_section = self.generate_contextual_section()
+        if contextual_section:
+            output.append(contextual_section)
         
         return '\n'.join(output)
 
@@ -464,3 +607,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+    
