@@ -138,23 +138,38 @@ class OTToOT2AAT:
             return [element]
     
     def parse_pair_positioning(self, line: str) -> bool:
-        """Parse: pos glyph1 glyph2 <value>;"""
-        pattern = r'pos\s+\[?\s*(\S+?)\s*\]?\s+\[?\s*(\S+?)\s*\]?\s+<(-?\d+)>;'
+        """Parse: pos [glyph1 glyph2] [glyph3] <xPlacement yPlacement xAdvance yAdvance>;"""
+        
+        # Match bracketed class or single glyph for both left and right
+        # (?:\[\s*([^\]]+)\s*\]|(\S+)) matches either [class] or glyph
+        pattern = r'pos\s+(?:\[\s*([^\]]+)\s*\]|(\S+))\s+(?:\[\s*([^\]]+)\s*\]|(\S+))\s+<(-?\d+)\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)>;'
         match = re.match(pattern, line.strip())
         
         if match:
-            left_elem = match.group(1)
-            right_elem = match.group(2)
-            value = int(match.group(3))
+            # Left can be group 1 (bracketed) or group 2 (single)
+            left_elem = match.group(1) if match.group(1) else match.group(2)
+            # Right can be group 3 (bracketed) or group 4 (single)
+            right_elem = match.group(3) if match.group(3) else match.group(4)
             
-            left_glyphs = self.expand_class_reference(left_elem)
-            right_glyphs = self.expand_class_reference(right_elem)
+            x_placement = int(match.group(5))
+            y_placement = int(match.group(6))
+            x_advance = int(match.group(7))
+            y_advance = int(match.group(8))
+            
+            # For AAT distance rules, we use xAdvance (horizontal kerning)
+            if x_advance == 0:
+                return True  # Valid but nothing to convert
+            
+            # Handle bracketed classes (split on whitespace) or single glyphs
+            left_glyphs = left_elem.split() if ' ' in left_elem else [left_elem]
+            right_glyphs = right_elem.split() if ' ' in right_elem else [right_elem]
             
             for left in left_glyphs:
                 for right in right_glyphs:
-                    self.distance_rules.append((left, right, value, 'horizontal'))
+                    self.distance_rules.append((left, right, x_advance, 'horizontal'))
             
             return True
+        
         return False
     
     def parse_markclass(self, line: str):
@@ -307,13 +322,23 @@ class OTToOT2AAT:
                 lines_consumed += 1
                 continue
             
-            if current_line.startswith('pos ') and '<' in current_line and '>' in current_line:
-                if not ('mark' in current_line or 'base' in current_line or 
+            if current_line.startswith('pos '):
+                if not ('mark' in current_line or 'base' in current_line or
                         'ligature' in current_line or "'" in current_line):
-                    if self.parse_pair_positioning(current_line):
-                        lines_consumed += 1
+                    # Collect full definition (may span multiple lines)
+                    full_def = current_line
+                    temp_consumed = 1
+                    
+                    while not full_def.rstrip().endswith(';'):
+                        if start_idx + lines_consumed + temp_consumed >= len(lines):
+                            break
+                        full_def += ' ' + lines[start_idx + lines_consumed + temp_consumed].strip()
+                        temp_consumed += 1
+                    
+                    if self.parse_pair_positioning(full_def):
+                        lines_consumed += temp_consumed
                         continue
-            
+                
             if current_line.startswith('pos base '):
                 consumed = self.parse_base(lines, start_idx + lines_consumed)
                 if consumed > 0:

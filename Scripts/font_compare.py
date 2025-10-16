@@ -185,35 +185,53 @@ def shape_with_coretext(font_path: str, text: str, font_size: float = 12.0) -> L
         return []
 
 
-def compare_glyph_sequences(glyphs1: List[GlyphInfo], glyphs2: List[GlyphInfo]) -> Tuple[bool, List[str]]:
+def compare_glyph_sequences(glyphs1: List[GlyphInfo], glyphs2: List[GlyphInfo]) -> Tuple[bool, List[str], str]:
     """
     Compare two glyph sequences
-    Returns: (is_match, list_of_differences)
+    Returns: (is_match, list_of_differences, error_type)
+    error_type: 'sub' (substitution), 'pos' (positioning), or None if match
     """
     differences = []
+    has_substitution_error = False
+    has_positioning_error = False
     
     # Compare glyph count
     if len(glyphs1) != len(glyphs2):
         differences.append(f"Glyph count differs: {len(glyphs1)} vs {len(glyphs2)}")
-        return False, differences
+        has_substitution_error = True
     
     # Compare each glyph
     for i, (g1, g2) in enumerate(zip(glyphs1, glyphs2)):
+        # Check substitution first (glyph ID mismatch)
         if g1.glyph_id != g2.glyph_id:
             differences.append(f"Glyph[{i}] ID differs: {g1.glyph_id} vs {g2.glyph_id}")
+            has_substitution_error = True
         
+        # Check positioning (offset and advance)
         if g1.x_offset != g2.x_offset or g1.y_offset != g2.y_offset:
             differences.append(f"Glyph[{i}] offset differs: ({g1.x_offset},{g1.y_offset}) vs ({g2.x_offset},{g2.y_offset})")
+            has_positioning_error = True
         
         if g1.x_advance != g2.x_advance or g1.y_advance != g2.y_advance:
             differences.append(f"Glyph[{i}] advance differs: ({g1.x_advance},{g1.y_advance}) vs ({g2.x_advance},{g2.y_advance})")
+            has_positioning_error = True
     
     is_match = len(differences) == 0
-    return is_match, differences
+    
+    # Determine error type (prioritize substitution errors)
+    if has_substitution_error:
+        error_type = 'sub'
+    elif has_positioning_error:
+        error_type = 'pos'
+    else:
+        error_type = None
+    
+    return is_match, differences, error_type
 
 
 def compare_fonts(font1_path: str, font2_path: str, wordlist_path: str,
-                  shaper: str = 'hb', output_file: Optional[str] = None) -> Dict:
+                  shaper: str = 'hb', output_file: Optional[str] = None,
+                  max_errors: int = 100) -> Dict:
     """
     Compare shaping output between two fonts
     """
@@ -238,8 +256,12 @@ def compare_fonts(font1_path: str, font2_path: str, wordlist_path: str,
     # Compare each word
     results = {
         'total_words': len(words),
+        'words_processed': 0,
         'matches': 0,
         'mismatches': 0,
+        'sub_errors': 0,
+        'pos_errors': 0,
+        'stopped_early': False,
         'mismatched_words': [],
         'details': []
     }
@@ -247,17 +269,29 @@ def compare_fonts(font1_path: str, font2_path: str, wordlist_path: str,
     print(f"\nComparing {len(words)} words using {shaper.upper()} shaper...")
     print(f"Font 1: {Path(font1_path).name}")
     print(f"Font 2: {Path(font2_path).name}")
+    print(f"Max errors: {max_errors}")
+    print("\nError types:")
+    print("  🔀 SUB = Substitution errors (glyph IDs differ)")
+    print("  📍 POS = Positioning errors (positions/advances differ)")
     print("-" * 60)
     
     for word in words:
+        # Check if we've hit max errors
+        if results['mismatches'] >= max_errors:
+            results['stopped_early'] = True
+            break
+        
         glyphs1 = shape_func(font1_path, word)
         glyphs2 = shape_func(font2_path, word)
         
-        is_match, differences = compare_glyph_sequences(glyphs1, glyphs2)
+        results['words_processed'] += 1
+        
+        is_match, differences, error_type = compare_glyph_sequences(glyphs1, glyphs2)
         
         detail = {
             'word': word,
             'match': is_match,
+            'error_type': error_type,
             'font1_glyphs': [{'id': g.glyph_id, 'name': g.glyph_name,
                              'offset': (g.x_offset, g.y_offset),
                              'advance': (g.x_advance, g.y_advance)} for g in glyphs1],
@@ -273,8 +307,14 @@ def compare_fonts(font1_path: str, font2_path: str, wordlist_path: str,
             results['matches'] += 1
         else:
             results['mismatches'] += 1
+            if error_type == 'sub':
+                results['sub_errors'] += 1
+            elif error_type == 'pos':
+                results['pos_errors'] += 1
+            
             results['mismatched_words'].append({
                 'word': word,
+                'error_type': error_type,
                 'differences': differences
             })
     
@@ -282,18 +322,31 @@ def compare_fonts(font1_path: str, font2_path: str, wordlist_path: str,
     print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)
-    print(f"Total words compared: {results['total_words']}")
-    print(f"Matches:             {results['matches']}")
-    print(f"Mismatches:          {results['mismatches']}")
+    print(f"Total words in list:  {results['total_words']}")
+    print(f"Words processed:      {results['words_processed']}")
+    print(f"Matches:              {results['matches']}")
+    print(f"Mismatches:           {results['mismatches']}")
+    print(f"  🔀 SUB errors:      {results['sub_errors']}")
+    print(f"  📍 POS errors:      {results['pos_errors']}")
     
     if results['mismatched_words']:
         print(f"\nMismatched words ({len(results['mismatched_words'])}):")
         for item in results['mismatched_words']:
-            print(f"  • {item['word']}")
+            # Choose emoji based on error type
+            emoji = '🔀' if item['error_type'] == 'sub' else '📍'
+            error_label = 'SUB' if item['error_type'] == 'sub' else 'POS'
+            
+            print(f"  {emoji} [{error_label}] {item['word']}")
             for diff in item['differences'][:3]:  # Show first 3 differences
-                print(f"    - {diff}")
+                print(f"      - {diff}")
             if len(item['differences']) > 3:
-                print(f"    ... and {len(item['differences']) - 3} more differences")
+                print(f"      ... and {len(item['differences']) - 3} more differences")
+    
+    if results['stopped_early']:
+        print("\n" + "!" * 60)
+        print(f"⚠️  STOPPED EARLY: Reached maximum error limit ({max_errors})")
+        print(f"   Not all words were processed ({results['total_words'] - results['words_processed']} words remaining)")
+        print("!" * 60)
     
     # Save detailed results
     if output_file:
@@ -321,6 +374,12 @@ Examples:
   
   # Save results to file
   %(prog)s --shaper hb font1.otf font2.ttf wordlist.txt --output results.json
+  
+  # Stop after 50 mismatches
+  %(prog)s --shaper hb font1.otf font2.ttf wordlist.txt --maxerrors 50
+  
+  # Process all words regardless of errors
+  %(prog)s --shaper hb font1.otf font2.ttf wordlist.txt --maxerrors 999999
         """
     )
     
@@ -330,6 +389,8 @@ Examples:
     parser.add_argument('--shaper', choices=['hb', 'coretext'], default='hb',
                        help='Shaper to use: hb (HarfBuzz) or coretext (CoreText on macOS)')
     parser.add_argument('--output', '-o', help='Output file for detailed results (JSON)')
+    parser.add_argument('--maxerrors', type=int, default=100,
+                       help='Maximum number of mismatches before stopping (default: 100)')
     
     args = parser.parse_args()
     
@@ -340,7 +401,7 @@ Examples:
             sys.exit(1)
     
     # Run comparison
-    compare_fonts(args.font1, args.font2, args.wordlist, args.shaper, args.output)
+    compare_fonts(args.font1, args.font2, args.wordlist, args.shaper, args.output, args.maxerrors)
 
 
 if __name__ == '__main__':

@@ -58,13 +58,13 @@ class AARToATIFConverter:
             
             # Parse distance adjustment
             if line.startswith('@distance'):
-                # @distance glyph1 @CLASS distance direction
+                # @distance glyph1 glyph2/CLASS distance direction
                 parts = line.split()
                 glyph1 = parts[1]
-                class_name = parts[2]
+                target = parts[2]  # Could be glyph or @CLASS
                 distance = int(parts[3])
                 direction = parts[4] if len(parts) > 4 else 'horizontal'
-                self.distance_rules.append((glyph1, class_name, distance, direction))
+                self.distance_rules.append((glyph1, target, distance, direction))
                 i += 1
                 continue
             
@@ -156,10 +156,16 @@ class AARToATIFConverter:
             output.append("    kerning is horizontal;")
             output.append("")
             
-            for glyph1, class_ref, distance, direction in self.distance_rules:
-                targets = self.expand_class(original_content, class_ref)
-                for target in targets:
-                    output.append(f"    {glyph1} + {target} => {distance};")
+            for glyph1, target, distance, direction in self.distance_rules:
+                if target.startswith('@'):
+                    # It's a class reference
+                    targets = self.expand_class(original_content, target)
+                else:
+                    # It's a single glyph
+                    targets = [target]
+                
+                for t in targets:
+                    output.append(f"    {glyph1} + {t} => {distance};")
             
             output.append("};")
             output.append("")
