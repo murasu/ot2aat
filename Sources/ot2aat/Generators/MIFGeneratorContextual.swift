@@ -1,7 +1,7 @@
 import Foundation
 
 extension MIFGenerator {
-    /// Generate MIF for contextual substitution
+    /// Generate MIF for contextual substitution (OPTIMIZED)
     
     // MARK: - Helper: Analyze Glyph Overlap
     private static func analyzeGlyphSets(
@@ -53,117 +53,93 @@ extension MIFGenerator {
         
         var tableNumber = 0
         
-        // Separate "after" rules by BOTH pattern length AND context set
+        // OPTIMIZED: Group "after" rules by pattern length, then by substitution pattern
         let allAfterRules = singlePassRules.filter {
             if case .after = $0.context { return true }
             return false
         }
         
-        // Group by pattern length first
         let afterByLength = Dictionary(grouping: allAfterRules) { rule -> Int in
             guard case .after(let context) = rule.context else { return 0 }
             return context.count
         }
         
-        // For each length, further group by context set
-        var afterTableGroups: [(length: Int, contextKey: String, rules: [ExpandedContextualRule])] = []
-        
-        for (length, rulesForLength) in afterByLength {
-            if length == 1 {
-                // For single-element patterns, group by the actual context glyph
-                let grouped = Dictionary(grouping: rulesForLength) { rule -> String in
-                    guard case .after(let context) = rule.context else { return "" }
-                    return context[0] // Group by the single context glyph
+        for (length, rulesForLength) in afterByLength.sorted(by: { $0.key < $1.key }) {
+            if length > 1 {
+                // Multi-element: ONE table for all rules with this pattern length
+                output += try generateMultiElementAfterSubtable(
+                    rules: rulesForLength,
+                    featureName: featureName,
+                    selectorNumber: selectorNumber,
+                    tableNumber: tableNumber
+                )
+                tableNumber += 1
+                
+            } else {
+                // Single-element: Group by substitution pattern
+                let bySubstitution = Dictionary(grouping: rulesForLength) { rule -> String in
+                    return rule.substitutions
+                        .map { "\($0.target)→\($0.replacement)" }
+                        .sorted()
+                        .joined(separator: ",")
                 }
                 
-                for (contextKey, rules) in grouped.sorted(by: { $0.key < $1.key }) {
-                    afterTableGroups.append((length: length, contextKey: contextKey, rules: rules))
+                for (_, groupedRules) in bySubstitution.sorted(by: { $0.key < $1.key }) {
+                    output += try generateContextualSubtable(
+                        rules: groupedRules,
+                        contextType: "after",
+                        featureName: featureName,
+                        selectorNumber: selectorNumber,
+                        tableNumber: tableNumber
+                    )
+                    tableNumber += 1
                 }
-            } else {
-                // For multi-element patterns, keep them together
-                afterTableGroups.append((length: length, contextKey: "", rules: rulesForLength))
             }
         }
         
-        // Generate a separate table for each group
-        for group in afterTableGroups {
-            if tableNumber > 0 { output += "\n" }
-            
-            if group.length > 1 {
-                output += try generateMultiElementAfterSubtable(
-                    rules: group.rules,
-                    featureName: featureName,
-                    selectorNumber: selectorNumber,
-                    tableNumber: tableNumber
-                )
-            } else {
-                output += try generateContextualSubtable(
-                    rules: group.rules,
-                    contextType: "after",
-                    featureName: featureName,
-                    selectorNumber: selectorNumber,
-                    tableNumber: tableNumber
-                )
-            }
-            tableNumber += 1
-        }
-        
-        // Separate "before" rules by BOTH pattern length AND context set
+        // OPTIMIZED: Group "before" rules by pattern length, then by substitution pattern
         let allBeforeRules = singlePassRules.filter {
             if case .before = $0.context { return true }
             return false
         }
         
-        // Group by pattern length first
         let beforeByLength = Dictionary(grouping: allBeforeRules) { rule -> Int in
             guard case .before(let context) = rule.context else { return 0 }
             return context.count
         }
         
-        // For each length, further group by context set
-        var beforeTableGroups: [(length: Int, contextKey: String, rules: [ExpandedContextualRule])] = []
-        
-        for (length, rulesForLength) in beforeByLength {
-            if length == 1 {
-                // For single-element patterns, group by the actual context glyph
-                let grouped = Dictionary(grouping: rulesForLength) { rule -> String in
-                    guard case .before(let context) = rule.context else { return "" }
-                    return context[0] // Group by the single context glyph
+        for (length, rulesForLength) in beforeByLength.sorted(by: { $0.key < $1.key }) {
+            if length > 1 {
+                output += try generateMultiElementBeforeSubtable(
+                    rules: rulesForLength,
+                    featureName: featureName,
+                    selectorNumber: selectorNumber,
+                    tableNumber: tableNumber
+                )
+                tableNumber += 1
+                
+            } else {
+                let bySubstitution = Dictionary(grouping: rulesForLength) { rule -> String in
+                    return rule.substitutions
+                        .map { "\($0.target)→\($0.replacement)" }
+                        .sorted()
+                        .joined(separator: ",")
                 }
                 
-                for (contextKey, rules) in grouped.sorted(by: { $0.key < $1.key }) {
-                    beforeTableGroups.append((length: length, contextKey: contextKey, rules: rules))
+                for (_, groupedRules) in bySubstitution.sorted(by: { $0.key < $1.key }) {
+                    output += try generateContextualSubtable(
+                        rules: groupedRules,
+                        contextType: "before",
+                        featureName: featureName,
+                        selectorNumber: selectorNumber,
+                        tableNumber: tableNumber
+                    )
+                    tableNumber += 1
                 }
-            } else {
-                // For multi-element patterns, keep them together
-                beforeTableGroups.append((length: length, contextKey: "", rules: rulesForLength))
             }
         }
         
-        // Generate a separate table for each group
-        for group in beforeTableGroups {
-            if tableNumber > 0 { output += "\n" }
-            
-            if group.length > 1 {
-                output += try generateMultiElementBeforeSubtable(
-                    rules: group.rules,
-                    featureName: featureName,
-                    selectorNumber: selectorNumber,
-                    tableNumber: tableNumber
-                )
-            } else {
-                output += try generateContextualSubtable(
-                    rules: group.rules,
-                    contextType: "before",
-                    featureName: featureName,
-                    selectorNumber: selectorNumber,
-                    tableNumber: tableNumber
-                )
-            }
-            tableNumber += 1
-        }
-        
-        // Between and when don't need context grouping
+        // Between and when don't need optimization - they're already minimal
         let allBetweenRules = singlePassRules.filter {
             if case .between = $0.context { return true }
             return false
@@ -175,7 +151,6 @@ extension MIFGenerator {
         }
         
         if !allBetweenRules.isEmpty {
-            if tableNumber > 0 { output += "\n" }
             output += try generateContextualSubtable(
                 rules: allBetweenRules,
                 contextType: "between",
@@ -187,7 +162,6 @@ extension MIFGenerator {
         }
         
         if !allWhenRules.isEmpty {
-            if tableNumber > 0 { output += "\n" }
             output += try generateContextualSubtable(
                 rules: allWhenRules,
                 contextType: "when",
@@ -215,7 +189,6 @@ extension MIFGenerator {
             }
             
             if !cleanupRulesInGroup.isEmpty {
-                if tableNumber > 0 { output += "\n" }
                 output += try generateCleanupTableForContextual(
                     rules: cleanupRulesInGroup,
                     featureName: featureName,
@@ -228,7 +201,6 @@ extension MIFGenerator {
         
         // Generate multi-pass rules (each gets 3 tables)
         for multiPassRule in multiPassRules {
-            if tableNumber > 0 { output += "\n" }
             output += try generateMultiPassTables(
                 rule: multiPassRule,
                 featureName: featureName,
@@ -240,7 +212,6 @@ extension MIFGenerator {
         
         // Generate remaining cleanup rules (not part of decomposed groups)
         if !cleanupRules.isEmpty {
-            if tableNumber > 0 { output += "\n" }
             output += try generateCleanupTableForContextual(
                 rules: cleanupRules,
                 featureName: featureName,
@@ -510,7 +481,7 @@ extension MIFGenerator {
         
         // For between, we need to check overlap with BOTH context sets
         let allContextGlyphs = firstContextGlyphs.union(secondContextGlyphs)
-        let (tgtOnly, _, both, hasOverlap) = analyzeGlyphSets(  // Use _ for ctxOnly
+        let (tgtOnly, _, both, hasOverlap) = analyzeGlyphSets(
             targets: targetGlyphs,
             contexts: allContextGlyphs
         )
@@ -1069,3 +1040,4 @@ extension MIFGenerator {
         return output
     }
 }
+

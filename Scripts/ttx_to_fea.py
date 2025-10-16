@@ -459,24 +459,22 @@ class TTXtoFEA:
         if fmt == '1' and 'rules' in rule:
             lines = []
             for r in rule['rules']:
-                # Build the sequence with marked positions
+                # Build a map of sequence positions to lookups
+                lookup_map = {seq_idx: lookup_idx for seq_idx, lookup_idx in r['lookups']}
+                
+                # Build the sequence with lookups interleaved
                 parts = []
                 for i, glyph in enumerate(r['input']):
-                    # Check if this position has a lookup applied
-                    has_lookup = any(seq_idx == i for seq_idx, _ in r['lookups'])
-                    glyph_str = glyph
-                    if has_lookup:
-                        glyph_str += "'"
-                    parts.append(glyph_str)
-                
-                # Add lookup references
-                lookup_refs = []
-                for seq_idx, lookup_idx in r['lookups']:
-                    lookup_refs.append(f"lookup_{lookup_idx}")
+                    if i in lookup_map:
+                        # This position has a lookup - mark it and add the lookup reference
+                        parts.append(f"{glyph}'")
+                        parts.append(f"lookup_{lookup_map[i]}")
+                    else:
+                        # No lookup at this position
+                        parts.append(glyph)
                 
                 context_str = " ".join(parts)
-                lookup_str = " ".join(lookup_refs)
-                lines.append(f"{indent}sub {context_str} by {lookup_str};")
+                lines.append(f"{indent}sub {context_str};")
             
             return "\n".join(lines)
         else:

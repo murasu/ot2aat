@@ -66,6 +66,19 @@ class ContextualSubstitution:
         self.lookup_refs = lookup_refs
 
 
+class RearrangementRule:
+    def __init__(self, input_sequence: List[str], output_sequence: List[str]):
+        self.input_sequence = input_sequence
+        self.output_sequence = output_sequence
+
+
+class RearrangementPattern:
+    """Stores unresolved rearrangement pattern with lookup references"""
+    def __init__(self, glyphs: List[str], lookup_refs: List[str]):
+        self.glyphs = glyphs
+        self.lookup_refs = lookup_refs
+
+
 class ParsedLookup:
     def __init__(self, info: LookupInfo):
         self.info = info
@@ -73,13 +86,16 @@ class ParsedLookup:
         self.ligatures: List[LigatureSubstitution] = []
         self.multiple_subs: List[MultipleSubstitution] = []
         self.contextual_subs: List[ContextualSubstitution] = []
+        self.rearrangement_rules: List[RearrangementRule] = []
+        self.rearrangement_patterns: List[RearrangementPattern] = []
         self.local_classes: Dict[str, List[str]] = {}
         self.raw_lines: List[str] = []
     
     def is_empty(self) -> bool:
         """Check if lookup has any content"""
         return not (self.single_subs or self.ligatures or
-                   self.multiple_subs or self.contextual_subs)
+                   self.multiple_subs or self.contextual_subs or
+                   self.rearrangement_rules or self.rearrangement_patterns)
 
 
 # MARK: - Main Converter Class
@@ -146,8 +162,13 @@ class GSUBToAAR:
         line = line.strip()
         if not line.startswith('sub '):
             return None
-        if "'" in line or 'by lookup' in line:
+        # Check for contextual with "by lookup" syntax
+        if 'by lookup' in line:
             return 'contextual'
+        # If it has ' and lookup_ (inline lookup references), it's rearrangement
+        if "'" in line and 'lookup_' in line and 'by lookup' not in line:
+            return None  # Let parse_inline_lookup_contextual handle it
+        # Regular substitution patterns
         parts = line.split(' by ')
         if len(parts) != 2:
             return None
@@ -246,6 +267,52 @@ class GSUBToAAR:
         )
         return True
     
+    def parse_inline_lookup_contextual(self, line: str, lookup: ParsedLookup) -> bool:
+        """Parse multi-marked contextual with inline lookup references (rearrangement)"""
+        # Pattern: sub glyph1' lookup_X glyph2' lookup_Y;
+        if "'" not in line or 'lookup_' not in line:
+            return False
+        
+        # Match pattern with multiple marked positions and inline lookups
+        pattern = r'sub\s+(.*?);'
+        match = re.match(pattern, line.strip())
+        if not match:
+            return False
+        
+        pattern_part = match.group(1).strip()
+        
+        # Parse tokens: glyph', lookup_X, glyph', lookup_Y
+        tokens = pattern_part.split()
+        
+        glyphs = []
+        lookups = []
+        
+        i = 0
+        while i < len(tokens):
+            token = tokens[i]
+            if token.endswith("'"):
+                # Marked glyph
+                glyph = token[:-1]
+                glyphs.append(glyph)
+                
+                # Next token should be lookup reference
+                if i + 1 < len(tokens) and tokens[i + 1].startswith('lookup_'):
+                    lookups.append(tokens[i + 1])
+                    i += 2
+                else:
+                    return False
+            else:
+                return False
+        
+        if len(glyphs) < 2 or len(glyphs) != len(lookups):
+            return False
+        
+        # Store the pattern to be resolved later
+        lookup.rearrangement_patterns.append(
+            RearrangementPattern(glyphs, lookups)
+        )
+        return True
+    
     def parse_lookup_body(self, lines: List[str], start_idx: int, lookup: ParsedLookup) -> int:
         lines_consumed = 0
         while start_idx + lines_consumed < len(lines):
@@ -275,6 +342,9 @@ class GSUBToAAR:
                     self.parse_multiple_substitution(current_line, lookup)
                 elif sub_type == 'contextual':
                     self.parse_contextual_substitution(current_line, lookup)
+                else:
+                    # Try parsing as inline lookup contextual (rearrangement)
+                    self.parse_inline_lookup_contextual(current_line, lookup)
                 lookup.raw_lines.append(current_line)
             lines_consumed += 1
         return lines_consumed
@@ -327,7 +397,7 @@ class GSUBToAAR:
                     consumed = self.parse_lookup_body(lines, i, parsed_lookup)
                     i += consumed
                     self.all_lookups[lookup_name] = parsed_lookup
-                    print(f"  Parsed lookup {lookup_name}", file=sys.stderr)
+                    print(f"  Parsed lookup {lookup_name}: single={len(parsed_lookup.single_subs)}, lig={len(parsed_lookup.ligatures)}, mult={len(parsed_lookup.multiple_subs)}, ctx={len(parsed_lookup.contextual_subs)}, reorder_pat={len(parsed_lookup.rearrangement_patterns)}", file=sys.stderr)
                     continue
             
             if line.startswith('@') and '=' in line:
@@ -352,6 +422,9 @@ class GSUBToAAR:
                     lookup.info.features.append(feature_name)
                 if script and script not in lookup.info.scripts:
                     lookup.info.scripts.append(script)
+                print(f"  Assigned feature={feature_name}, script={script} to {lookup_name}", file=sys.stderr)
+            else:
+                print(f"  WARNING: {lookup_name} referenced in features but not found!", file=sys.stderr)
         
         for lookup_name, lookup in self.all_lookups.items():
             if lookup_name not in referenced_lookups:
@@ -362,13 +435,21 @@ class GSUBToAAR:
         print(f"  Prefix lookups: {sum(1 for l in self.all_lookups.values() if l.info.is_prefix)}", file=sys.stderr)
         print(f"  Feature lookups: {sum(1 for l in self.all_lookups.values() if not l.info.is_prefix)}", file=sys.stderr)
         print(f"  Feature order entries: {len(self.feature_order)}", file=sys.stderr)
+        print(f"  Rearrangement patterns found: {sum(len(l.rearrangement_patterns) for l in self.all_lookups.values())}", file=sys.stderr)
     
     def should_include_lookup(self, lookup: ParsedLookup) -> bool:
-        if lookup.info.is_prefix or lookup.is_empty():
+        if lookup.info.is_prefix:
+            print(f"  Skipping {lookup.info.name}: is_prefix", file=sys.stderr)
+            return False
+        if lookup.is_empty():
+            print(f"  Skipping {lookup.info.name}: is_empty", file=sys.stderr)
             return False
         if not self.script_filter:
             return True
-        return any(script in lookup.info.scripts for script in self.script_filter)
+        has_script = any(script in lookup.info.scripts for script in self.script_filter)
+        if not has_script:
+            print(f"  Skipping {lookup.info.name}: no matching script (has: {lookup.info.scripts})", file=sys.stderr)
+        return has_script
     
     def inline_lookup_substitutions(self, lookup_name: str) -> Dict[str, str]:
         if lookup_name not in self.all_lookups:
@@ -376,6 +457,33 @@ class GSUBToAAR:
             return {}
         lookup = self.all_lookups[lookup_name]
         return {sub.source: sub.target for sub in lookup.single_subs}
+    
+    def resolve_rearrangement_pattern(self, pattern: RearrangementPattern) -> Optional[RearrangementRule]:
+        """Resolve a rearrangement pattern by looking up the substitutions"""
+        glyphs = pattern.glyphs
+        lookups = pattern.lookup_refs
+        
+        # Get substitutions from each lookup
+        substitutions = []
+        for i, lookup_name in enumerate(lookups):
+            if lookup_name not in self.all_lookups:
+                print(f"Warning: Lookup {lookup_name} not found for rearrangement", file=sys.stderr)
+                return None
+            
+            lookup_subs = self.inline_lookup_substitutions(lookup_name)
+            glyph = glyphs[i]
+            
+            if glyph not in lookup_subs:
+                print(f"Warning: Glyph {glyph} not found in {lookup_name}", file=sys.stderr)
+                return None
+            
+            substitutions.append(lookup_subs[glyph])
+        
+        # Check if output differs from input
+        if substitutions != glyphs:
+            return RearrangementRule(glyphs, substitutions)
+        
+        return None
     
     def generate_contextual_rules(self, ctx: ContextualSubstitution) -> List[str]:
         """Generate contextual rules - preserving multi-element patterns with named classes"""
@@ -464,6 +572,12 @@ class GSUBToAAR:
         return rules
     
     def generate_lookup_output(self, lookup: ParsedLookup) -> List[str]:
+        # Resolve rearrangement patterns first
+        for pattern in lookup.rearrangement_patterns:
+            rule = self.resolve_rearrangement_pattern(pattern)
+            if rule:
+                lookup.rearrangement_rules.append(rule)
+        
         output = []
         output.append("# " + "-" * 76)
         output.append(f"# Lookup: {lookup.info.name}")
@@ -497,12 +611,48 @@ class GSUBToAAR:
                 output.append(f"    {mult.source} > {targets}")
             output.append("}")
         
+        if lookup.rearrangement_rules:
+            output.append("@reorder {")
+            for reorder in lookup.rearrangement_rules:
+                input_seq = ' '.join(reorder.input_sequence)
+                output_seq = ' '.join(reorder.output_sequence)
+                output.append(f"    {input_seq} > {output_seq}")
+            output.append("}")
+        
         if lookup.contextual_subs:
             output.append("@contextual {")
+            
+            # Group rules by context
+            from collections import OrderedDict
+            grouped_rules = OrderedDict()
+            
             for ctx in lookup.contextual_subs:
-                rules = self.generate_contextual_rules(ctx)
-                for rule in rules:
-                    output.append(f"    {rule}")
+                rules_with_keys = self.generate_contextual_rules(ctx)
+                for item in rules_with_keys:
+                    if len(item) == 2:
+                        context_key, rule = item
+                        if context_key not in grouped_rules:
+                            grouped_rules[context_key] = []
+                        grouped_rules[context_key].append(rule)
+                    else:
+                        # Error case - just append the rule directly
+                        if "error" not in grouped_rules:
+                            grouped_rules["error"] = []
+                        grouped_rules["error"].append(str(item))
+            
+            # Output grouped rules with comments
+            for context_key, rules in grouped_rules.items():
+                if context_key.startswith('error'):
+                    # Error case
+                    for rule in rules:
+                        output.append(f"    {rule}")
+                else:
+                    # Add descriptive comment for each context group
+                    output.append(f"    # Pattern: {context_key}")
+                    for rule in rules:
+                        output.append(f"    {rule}")
+                    output.append("")  # Blank line between groups
+            
             output.append("}")
         
         output.append("")
@@ -568,8 +718,11 @@ class GSUBToAAR:
         current_feature = None
         processed_lookups = set()
         
+        print(f"\nGenerating output...", file=sys.stderr)
+        
         for feature_name, script, lookup_name in self.feature_order:
             if lookup_name not in self.all_lookups:
+                print(f"  Lookup {lookup_name} not in all_lookups", file=sys.stderr)
                 continue
             
             lookup = self.all_lookups[lookup_name]
@@ -586,6 +739,7 @@ class GSUBToAAR:
                 output.append("# " + "=" * 76)
                 output.append("")
             
+            print(f"  Generating output for {lookup_name}", file=sys.stderr)
             lookup_output = self.generate_lookup_output(lookup)
             output.extend(lookup_output)
             processed_lookups.add(lookup_name)
@@ -638,3 +792,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+    

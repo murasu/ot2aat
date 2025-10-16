@@ -1,7 +1,7 @@
 import Foundation
 
 extension ATIFGenerator {
-    /// Generate ATIF for contextual substitution
+    /// Generate ATIF for contextual substitution (OPTIMIZED)
     
     // MARK: - Helper: Analyze Glyph Overlap
     
@@ -59,109 +59,85 @@ extension ATIFGenerator {
         
         var subtableNumber = 0
         
-        // Separate "after" rules by BOTH pattern length AND context set
+        // OPTIMIZED: Group "after" rules by pattern length, then by substitution pattern
         let allAfterRules = singlePassRules.filter {
             if case .after = $0.context { return true }
             return false
         }
         
-        // Group by pattern length first
         let afterByLength = Dictionary(grouping: allAfterRules) { rule -> Int in
             guard case .after(let context) = rule.context else { return 0 }
             return context.count
         }
         
-        // For each length, further group by context set
-        var afterSubtableGroups: [(length: Int, contextKey: String, rules: [ExpandedContextualRule])] = []
-        
-        for (length, rulesForLength) in afterByLength {
-            if length == 1 {
-                // For single-element patterns, group by the actual context glyph
-                let grouped = Dictionary(grouping: rulesForLength) { rule -> String in
-                    guard case .after(let context) = rule.context else { return "" }
-                    return context[0] // Group by the single context glyph
+        for (length, rulesForLength) in afterByLength.sorted(by: { $0.key < $1.key }) {
+            if length > 1 {
+                // Multi-element: ONE subtable for all rules with this pattern length
+                output += try generateMultiElementAfterSubtable(
+                    rules: rulesForLength,
+                    subtableNumber: subtableNumber
+                )
+                subtableNumber += 1
+                
+            } else {
+                // Single-element: Group by substitution pattern
+                let bySubstitution = Dictionary(grouping: rulesForLength) { rule -> String in
+                    return rule.substitutions
+                        .map { "\($0.target)→\($0.replacement)" }
+                        .sorted()
+                        .joined(separator: ",")
                 }
                 
-                for (contextKey, rules) in grouped.sorted(by: { $0.key < $1.key }) {
-                    afterSubtableGroups.append((length: length, contextKey: contextKey, rules: rules))
+                for (_, groupedRules) in bySubstitution.sorted(by: { $0.key < $1.key }) {
+                    output += try generateContextualSubtable(
+                        rules: groupedRules,
+                        contextType: "after",
+                        subtableNumber: subtableNumber
+                    )
+                    subtableNumber += 1
                 }
-            } else {
-                // For multi-element patterns, keep them together
-                afterSubtableGroups.append((length: length, contextKey: "", rules: rulesForLength))
             }
         }
         
-        // Generate a separate subtable for each group
-        for group in afterSubtableGroups {
-            if subtableNumber > 0 { output += "\n" }
-            
-            if group.length > 1 {
-                output += try generateMultiElementAfterSubtable(
-                    rules: group.rules,
-                    subtableNumber: subtableNumber
-                )
-            } else {
-                output += try generateContextualSubtable(
-                    rules: group.rules,
-                    contextType: "after",
-                    subtableNumber: subtableNumber
-                )
-            }
-            subtableNumber += 1
-        }
-        
-        // Separate "before" rules by BOTH pattern length AND context set
+        // OPTIMIZED: Group "before" rules by pattern length, then by substitution pattern
         let allBeforeRules = singlePassRules.filter {
             if case .before = $0.context { return true }
             return false
         }
         
-        // Group by pattern length first
         let beforeByLength = Dictionary(grouping: allBeforeRules) { rule -> Int in
             guard case .before(let context) = rule.context else { return 0 }
             return context.count
         }
         
-        // For each length, further group by context set
-        var beforeSubtableGroups: [(length: Int, contextKey: String, rules: [ExpandedContextualRule])] = []
-        
-        for (length, rulesForLength) in beforeByLength {
-            if length == 1 {
-                // For single-element patterns, group by the actual context glyph
-                let grouped = Dictionary(grouping: rulesForLength) { rule -> String in
-                    guard case .before(let context) = rule.context else { return "" }
-                    return context[0] // Group by the single context glyph
+        for (length, rulesForLength) in beforeByLength.sorted(by: { $0.key < $1.key }) {
+            if length > 1 {
+                output += try generateMultiElementBeforeSubtable(
+                    rules: rulesForLength,
+                    subtableNumber: subtableNumber
+                )
+                subtableNumber += 1
+                
+            } else {
+                let bySubstitution = Dictionary(grouping: rulesForLength) { rule -> String in
+                    return rule.substitutions
+                        .map { "\($0.target)→\($0.replacement)" }
+                        .sorted()
+                        .joined(separator: ",")
                 }
                 
-                for (contextKey, rules) in grouped.sorted(by: { $0.key < $1.key }) {
-                    beforeSubtableGroups.append((length: length, contextKey: contextKey, rules: rules))
+                for (_, groupedRules) in bySubstitution.sorted(by: { $0.key < $1.key }) {
+                    output += try generateContextualSubtable(
+                        rules: groupedRules,
+                        contextType: "before",
+                        subtableNumber: subtableNumber
+                    )
+                    subtableNumber += 1
                 }
-            } else {
-                // For multi-element patterns, keep them together
-                beforeSubtableGroups.append((length: length, contextKey: "", rules: rulesForLength))
             }
         }
         
-        // Generate a separate subtable for each group
-        for group in beforeSubtableGroups {
-            if subtableNumber > 0 { output += "\n" }
-            
-            if group.length > 1 {
-                output += try generateMultiElementBeforeSubtable(
-                    rules: group.rules,
-                    subtableNumber: subtableNumber
-                )
-            } else {
-                output += try generateContextualSubtable(
-                    rules: group.rules,
-                    contextType: "before",
-                    subtableNumber: subtableNumber
-                )
-            }
-            subtableNumber += 1
-        }
-        
-        // Between and when don't need context grouping
+        // Between and when don't need optimization
         let allBetweenRules = singlePassRules.filter {
             if case .between = $0.context { return true }
             return false
@@ -173,7 +149,6 @@ extension ATIFGenerator {
         }
         
         if !allBetweenRules.isEmpty {
-            if subtableNumber > 0 { output += "\n" }
             output += try generateContextualSubtable(
                 rules: allBetweenRules,
                 contextType: "between",
@@ -183,7 +158,6 @@ extension ATIFGenerator {
         }
         
         if !allWhenRules.isEmpty {
-            if subtableNumber > 0 { output += "\n" }
             output += try generateContextualSubtable(
                 rules: allWhenRules,
                 contextType: "when",
@@ -209,7 +183,6 @@ extension ATIFGenerator {
             }
             
             if !cleanupRulesInGroup.isEmpty {
-                if subtableNumber > 0 { output += "\n" }
                 output += try generateCleanupSubtable(
                     rules: cleanupRulesInGroup,
                     subtableNumber: subtableNumber
@@ -220,7 +193,6 @@ extension ATIFGenerator {
         
         // Generate multi-pass rules
         for multiPassRule in multiPassRules {
-            if subtableNumber > 0 { output += "\n" }
             output += try generateMultiPassSubtablesForContextual(
                 rule: multiPassRule,
                 startSubtableNumber: subtableNumber
@@ -230,7 +202,6 @@ extension ATIFGenerator {
         
         // Generate remaining cleanup rules
         if !cleanupRules.isEmpty {
-            if subtableNumber > 0 { output += "\n" }
             output += try generateCleanupSubtable(
                 rules: cleanupRules,
                 subtableNumber: subtableNumber
@@ -338,7 +309,7 @@ extension ATIFGenerator {
         }
         output += "    };\n"
         
-        output += "};\n"
+        output += "};\n\n"
         
         return output
     }
@@ -393,7 +364,7 @@ extension ATIFGenerator {
         }
         output += "    };\n"
         
-        output += "};\n"
+        output += "};\n\n"
         
         return output
     }
@@ -479,7 +450,7 @@ extension ATIFGenerator {
         }
         output += "    };\n"
         
-        output += "};\n"
+        output += "};\n\n"
         
         return output
     }
@@ -537,7 +508,7 @@ extension ATIFGenerator {
         }
         output += "    };\n"
         
-        output += "};\n"
+        output += "};\n\n"
         
         return output
     }
@@ -639,7 +610,7 @@ extension ATIFGenerator {
         }
         output += "    };\n"
         
-        output += "};\n"
+        output += "};\n\n"
         
         return output
     }
@@ -719,7 +690,7 @@ extension ATIFGenerator {
         }
         output += "    };\n"
         
-        output += "};\n"
+        output += "};\n\n"
         
         return output
     }
@@ -778,7 +749,7 @@ extension ATIFGenerator {
         }
         output += "    };\n"
         
-        output += "};\n"
+        output += "};\n\n"
         
         return output
     }
@@ -850,7 +821,7 @@ extension ATIFGenerator {
         }
         output += "    };\n"
         
-        output += "};\n"
+        output += "};\n\n"
         
         return output
     }
@@ -871,7 +842,7 @@ extension ATIFGenerator {
         let (lastTarget, lastReplacement) = substitutions.last!
         output += "    \(lastTarget) => \(lastReplacement);\n"
         
-        output += "};\n"
+        output += "};\n\n"
         
         return output
     }
@@ -889,7 +860,7 @@ extension ATIFGenerator {
             output += "    \(tempGlyph) => DEL;\n"
         }
         
-        output += "};\n"
+        output += "};\n\n"
         
         return output
     }
@@ -911,7 +882,7 @@ extension ATIFGenerator {
             output += "    \(target) => \(replacement);\n"
         }
         
-        output += "};\n"
+        output += "};\n\n"
         
         return output
     }
@@ -994,7 +965,7 @@ extension ATIFGenerator {
         }
         output += "    };\n"
         
-        output += "};\n"
+        output += "};\n\n"
         
         return output
     }
@@ -1084,10 +1055,9 @@ extension ATIFGenerator {
         }
         output += "    };\n"
         
-        output += "};\n"
+        output += "};\n\n"
         
         return output
     }
 }
-
 
