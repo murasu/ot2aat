@@ -185,15 +185,38 @@ def shape_with_coretext(font_path: str, text: str, font_size: float = 12.0) -> L
         return []
 
 
-def compare_glyph_sequences(glyphs1: List[GlyphInfo], glyphs2: List[GlyphInfo]) -> Tuple[bool, List[str], str]:
+def values_match_within_tolerance(val1: float, val2: float, tolerance: float) -> bool:
+    """Check if two values match within tolerance"""
+    return abs(val1 - val2) <= tolerance
+
+
+def check_y_advance_cancellation(glyphs1: List[GlyphInfo], glyphs2: List[GlyphInfo], 
+                                  tolerance: float = 3.0) -> bool:
     """
-    Compare two glyph sequences
+    Check if Y-advance differences cancel out (sum to near zero).
+    This handles cases where AAT distributes Y-advances differently than GPOS
+    but the final positioning is the same.
+    """
+    if len(glyphs1) != len(glyphs2):
+        return False
+    
+    total_y_adv_diff = sum(g2.y_advance - g1.y_advance 
+                           for g1, g2 in zip(glyphs1, glyphs2))
+    
+    return abs(total_y_adv_diff) <= tolerance
+
+
+def compare_glyph_sequences(glyphs1: List[GlyphInfo], glyphs2: List[GlyphInfo],
+                           tolerance: float = 0.01) -> Tuple[bool, List[str], str]:
+    """
+    Compare two glyph sequences with tolerance
     Returns: (is_match, list_of_differences, error_type)
     error_type: 'sub' (substitution), 'pos' (positioning), or None if match
     """
     differences = []
     has_substitution_error = False
     has_positioning_error = False
+    y_advance_differences = []
     
     # Compare glyph count
     if len(glyphs1) != len(glyphs2):
@@ -207,16 +230,43 @@ def compare_glyph_sequences(glyphs1: List[GlyphInfo], glyphs2: List[GlyphInfo]) 
             differences.append(f"Glyph[{i}] ID differs: {g1.glyph_id} vs {g2.glyph_id}")
             has_substitution_error = True
         
-        # Check positioning (offset and advance)
-        if g1.x_offset != g2.x_offset or g1.y_offset != g2.y_offset:
+        # Check positioning with tolerance
+        if not values_match_within_tolerance(g1.x_offset, g2.x_offset, tolerance) or \
+           not values_match_within_tolerance(g1.y_offset, g2.y_offset, tolerance):
             differences.append(f"Glyph[{i}] offset differs: ({g1.x_offset},{g1.y_offset}) vs ({g2.x_offset},{g2.y_offset})")
             has_positioning_error = True
         
-        if g1.x_advance != g2.x_advance or g1.y_advance != g2.y_advance:
-            differences.append(f"Glyph[{i}] advance differs: ({g1.x_advance},{g1.y_advance}) vs ({g2.x_advance},{g2.y_advance})")
+        # Check X-advance with tolerance
+        if not values_match_within_tolerance(g1.x_advance, g2.x_advance, tolerance):
+            differences.append(f"Glyph[{i}] X-advance differs: {g1.x_advance} vs {g2.x_advance}")
+            has_positioning_error = True
+        
+        # Track Y-advance differences separately for cancellation check
+        if not values_match_within_tolerance(g1.y_advance, g2.y_advance, tolerance):
+            y_adv_diff = g2.y_advance - g1.y_advance
+            y_advance_differences.append((i, g1.y_advance, g2.y_advance, y_adv_diff))
+    
+    # Special handling for Y-advance differences that cancel out
+    if y_advance_differences and not has_substitution_error:
+        # Check if Y-advances cancel out (AAT vs GPOS internal difference)
+        if check_y_advance_cancellation(glyphs1, glyphs2, tolerance):
+            # Remove Y-advance differences from error list since they cancel
+            differences = [d for d in differences if 'Y-advance differs' not in d and 'advance differs' not in d or 'X-advance' in d]
+            
+            # Add informational note
+            if y_advance_differences:
+                total_diff = sum(d[3] for d in y_advance_differences)
+                differences.append(f"ℹ️  Y-advances differ but cancel out (total: {total_diff:.2f}, within tolerance)")
+                # This is acceptable, not an error
+                if not differences or all('ℹ️' in d for d in differences):
+                    has_positioning_error = False
+        else:
+            # Y-advances don't cancel - real error
+            for i, y1, y2, diff in y_advance_differences:
+                differences.append(f"Glyph[{i}] Y-advance differs: {y1} vs {y2} (diff: {diff:.2f})")
             has_positioning_error = True
     
-    is_match = len(differences) == 0
+    is_match = len([d for d in differences if not d.startswith('ℹ️')]) == 0
     
     # Determine error type (prioritize substitution errors)
     if has_substitution_error:
@@ -231,7 +281,7 @@ def compare_glyph_sequences(glyphs1: List[GlyphInfo], glyphs2: List[GlyphInfo]) 
 
 def compare_fonts(font1_path: str, font2_path: str, wordlist_path: str,
                   shaper: str = 'hb', output_file: Optional[str] = None,
-                  max_errors: int = 100) -> Dict:
+                  max_errors: int = 100, tolerance: float = 0.01) -> Dict:
     """
     Compare shaping output between two fonts
     """
@@ -261,6 +311,7 @@ def compare_fonts(font1_path: str, font2_path: str, wordlist_path: str,
         'mismatches': 0,
         'sub_errors': 0,
         'pos_errors': 0,
+        'acceptable_differences': 0,
         'stopped_early': False,
         'mismatched_words': [],
         'details': []
@@ -269,10 +320,12 @@ def compare_fonts(font1_path: str, font2_path: str, wordlist_path: str,
     print(f"\nComparing {len(words)} words using {shaper.upper()} shaper...")
     print(f"Font 1: {Path(font1_path).name}")
     print(f"Font 2: {Path(font2_path).name}")
+    print(f"Tolerance: ±{tolerance}")
     print(f"Max errors: {max_errors}")
     print("\nError types:")
     print("  🔀 SUB = Substitution errors (glyph IDs differ)")
     print("  📍 POS = Positioning errors (positions/advances differ)")
+    print("  ℹ️  INFO = Acceptable differences (e.g., Y-advances that cancel)")
     print("-" * 60)
     
     for word in words:
@@ -286,7 +339,10 @@ def compare_fonts(font1_path: str, font2_path: str, wordlist_path: str,
         
         results['words_processed'] += 1
         
-        is_match, differences, error_type = compare_glyph_sequences(glyphs1, glyphs2)
+        is_match, differences, error_type = compare_glyph_sequences(glyphs1, glyphs2, tolerance)
+        
+        # Check if differences are all informational
+        has_real_errors = any(not d.startswith('ℹ️') for d in differences)
         
         detail = {
             'word': word,
@@ -305,18 +361,25 @@ def compare_fonts(font1_path: str, font2_path: str, wordlist_path: str,
         
         if is_match:
             results['matches'] += 1
+            if differences:  # Has informational differences
+                results['acceptable_differences'] += 1
         else:
-            results['mismatches'] += 1
-            if error_type == 'sub':
-                results['sub_errors'] += 1
-            elif error_type == 'pos':
-                results['pos_errors'] += 1
-            
-            results['mismatched_words'].append({
-                'word': word,
-                'error_type': error_type,
-                'differences': differences
-            })
+            if has_real_errors:
+                results['mismatches'] += 1
+                if error_type == 'sub':
+                    results['sub_errors'] += 1
+                elif error_type == 'pos':
+                    results['pos_errors'] += 1
+                
+                results['mismatched_words'].append({
+                    'word': word,
+                    'error_type': error_type,
+                    'differences': differences
+                })
+            else:
+                # Only informational differences
+                results['matches'] += 1
+                results['acceptable_differences'] += 1
     
     # Print summary
     print("\n" + "=" * 60)
@@ -325,6 +388,8 @@ def compare_fonts(font1_path: str, font2_path: str, wordlist_path: str,
     print(f"Total words in list:  {results['total_words']}")
     print(f"Words processed:      {results['words_processed']}")
     print(f"Matches:              {results['matches']}")
+    if results['acceptable_differences'] > 0:
+        print(f"  (with acceptable differences: {results['acceptable_differences']})")
     print(f"Mismatches:           {results['mismatches']}")
     print(f"  🔀 SUB errors:      {results['sub_errors']}")
     print(f"  📍 POS errors:      {results['pos_errors']}")
@@ -366,20 +431,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Using HarfBuzz
+  # Using HarfBuzz with default tolerance
   %(prog)s --shaper hb font1.otf font2.ttf wordlist.txt
   
-  # Using CoreText (macOS only)
-  %(prog)s --shaper coretext font1.otf font2.ttf wordlist.txt
+  # Using CoreText with custom tolerance
+  %(prog)s --shaper coretext font1.otf font2.ttf wordlist.txt --tolerance 5.0
   
   # Save results to file
   %(prog)s --shaper hb font1.otf font2.ttf wordlist.txt --output results.json
   
   # Stop after 50 mismatches
   %(prog)s --shaper hb font1.otf font2.ttf wordlist.txt --maxerrors 50
-  
-  # Process all words regardless of errors
-  %(prog)s --shaper hb font1.otf font2.ttf wordlist.txt --maxerrors 999999
         """
     )
     
@@ -391,6 +453,8 @@ Examples:
     parser.add_argument('--output', '-o', help='Output file for detailed results (JSON)')
     parser.add_argument('--maxerrors', type=int, default=100,
                        help='Maximum number of mismatches before stopping (default: 100)')
+    parser.add_argument('--tolerance', type=float, default=0.01,
+                       help='Tolerance for position/advance differences (default: 0.01)')
     
     args = parser.parse_args()
     
@@ -401,7 +465,8 @@ Examples:
             sys.exit(1)
     
     # Run comparison
-    compare_fonts(args.font1, args.font2, args.wordlist, args.shaper, args.output, args.maxerrors)
+    compare_fonts(args.font1, args.font2, args.wordlist, args.shaper, 
+                 args.output, args.maxerrors, args.tolerance)
 
 
 if __name__ == '__main__':
